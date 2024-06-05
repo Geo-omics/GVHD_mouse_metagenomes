@@ -1,0 +1,233 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = here::here())
+library(metacoder)
+library(tidyverse)
+library(ggpubr)
+library(ggtext)
+library(patchwork)
+library(vegan)
+library(ggnewscale)
+library(ggtree)
+source(here::here("code/funcs.R"))
+
+set.seed(2022)
+```
+
+## Load data
+```{r}
+metadata <- read_metaG_metadata()
+```
+
+
+# KeggDecoder results
+```{r}
+
+KD_res <- system("ls /home/kiledal/GVHD/data/omics/metagenomes/coassembly/bins/kofamscan/bins/*.txt", intern = TRUE) %>% 
+  data.frame(path = .) %>% 
+  mutate(new_path = path %>% str_remove("_kofam_results.txt") %>% paste0(.,".txt"),
+         new_path = new_path %>% str_replace("kofamscan/bins/", "kofamscan/bins2/"))
+
+fs::link_create(KD_res$path, KD_res$new_path,symbolic = FALSE)
+
+```
+
+
+```{r}
+module_summaries <- system("ls data/omics/metagenomes/coassembly/bins/kegg_modules/*/reports_tsv/*.tsv", intern = TRUE) %>% 
+  data.frame(path = .)
+
+#path = "data/omics/metagenomes/coassembly/bins/kegg_modules/0245e67227092c6391e231e929be7edd_concoct_723/reports_tsv/reportKMC_0245e67227092c6391e231e929be7edd_concoct_723.tsv"
+
+read_module_completion <- function(path){
+  columns <- c("module_id",	"module_name", "completeness", "complete_and_total_blocks",	"missing_KO", "KO_present")
+  
+  module_completion <- read_tsv(path, col_names = columns,show_col_types = FALSE) %>% 
+    mutate(complete_blocks = complete_and_total_blocks %>% str_remove("__.*") %>% as.numeric(),
+           total_blocks = complete_and_total_blocks %>% str_remove(".*__") %>% as.numeric(),
+           percent_complete = (complete_blocks / total_blocks) * 100, 
+           bin = path %>% str_remove(".*reportKMC_") %>% str_remove("\\.tsv"))
+}
+
+module_completions <- map_dfr(module_summaries$path, read_module_completion) %>% 
+  write_rds("data/omics/metagenomes/coassembly/bins/KEGG_module_completion.rds")
+```
+
+```{r}
+module_completions <- read_rds("data/omics/metagenomes/coassembly/bins/KEGG_module_completion.rds")
+```
+
+
+```{r}
+high_ind_modules <- c("M00049", "M00050", "M00007", "M00140", "M00005", "M00083", "M00120", "M00854", "M00527", "M00096", "M00048", "M00855", "M00022", "M00844", "M00051", "M00082", "M00157", "M00026", "M00526", "M00015", "M00019", "M00432", "M00018", "M00570", "M00126", "M00115", "M00028", "M00924", "M00122", "M00125", "M00023", "M00631", "M00061")
+```
+
+
+```{r}
+high_ind_completeness <- module_completions %>% 
+  filter(module_id %in% high_ind_modules) %>% 
+  group_by(bin, module_id) %>% 
+  slice_max(percent_complete, n = 1, with_ties = FALSE) %>% 
+  group_by(bin) %>% 
+  summarise(independence = sum(percent_complete >= 75))
+
+high_ind_completeness_w_tax <- high_ind_completeness %>% 
+  left_join(percent_abund %>% ungroup() %>% select(bin = genome, classification, Domain, Phylum, Class, Order, Family, Genus, Species) %>% unique())
+
+```
+
+```{r}
+plot_data <- high_ind_completeness %>% 
+  rename(genome = "bin") %>% 
+  left_join(percent_abund %>% select(genome, sample, percent_abund, percent_covered_bases, plot_categories, classification, Domain, Phylum, Class, Order, Family, Genus, Species))
+
+high_ind_w_real_abund <- plot_data %>% 
+  filter(!is.na(plot_categories),
+         percent_abund > 1,
+        independence > 20)
+
+```
+
+
+```{r}
+plot_data %>% 
+  filter(!is.na(plot_categories),
+         percent_abund > 1) %>% 
+  ggplot(aes(plot_categories, independence)) +
+  geom_boxplot() +
+  labs(x = NULL, subtitle = "Metabolic independence of organisms with > 1% abundance")+
+  theme_bw() 
+ggsave("results/functional/figures/metabolic_ind_boxplot.pdf", width = 5, height = 3, dpi = 300, scale = 1.5)
+
+```
+
+```{r}
+plot_data %>% 
+  filter(!is.na(plot_categories),
+         percent_abund > 1) %>% 
+  ggplot(aes(plot_categories, independence)) +
+  geom_violin() +
+  labs(x = NULL, subtitle = "Metabolic independence of organisms with > 1% abundance")+
+  theme_bw()
+ggsave("results/functional/figures/metabolic_ind_violin.pdf", width = 5, height = 3, dpi = 300, scale = 1.5)
+```
+
+
+```{r}
+plot_data %>% 
+  filter(!is.na(plot_categories),
+         percent_abund > 1,
+        independence > 20) %>% 
+  ggplot(aes(plot_categories)) +
+  geom_bar() +
+  labs(x = NULL, 
+       y = "Number of MAGs",
+       subtitle = "MAGs with >1% abundance and high metabolic independence")+
+  theme_bw()
+
+ggsave("results/functional/figures/high_metabolic_ind_barplot.pdf", width = 5, height = 3, dpi = 300, scale = 1.5)
+```
+
+
+```{r}
+plot_data %>% ggplot(aes(percent_abund, independence)) +
+  geom_smooth(method = "lm") +
+  facet_wrap(plot_categories ~.)
+
+plot_data %>% ggplot(aes(percent_abund, independence)) +
+  #geom_point() +
+  #geom_density_2d_filled(contour_var = "ndensity") +
+  facet_wrap(plot_categories ~.) +
+  scale_y_log10() +
+  scale_x_log10()
+
+plot_data %>% 
+  filter(!is.na(plot_categories )) %>% 
+  ggplot(aes(independence, fill = plot_categories)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(plot_categories ~.)
+
+```
+
+```{r}
+plot_data %>% 
+  filter(!is.na(plot_categories)) +
+  ggplot(aes(plot_categories, independence)) +
+  geom_violin() +
+  scale_y_log10()
+```
+
+
+
+
+```{r}
+abund_dist <- percent_abund %>% 
+  ungroup() %>% 
+  select(bin = genome, classification, Domain, Phylum, Class, Order, Family, Genus, Species, sample_id, transplant_type, gut_section, plot_categories, percent_abund) %>% 
+  left_join(high_ind_completeness) %>% 
+  filter(percent_abund > 1)
+
+abund_dist %>% 
+  filter()
+  ggplot(aes(independence, fill = plot_categories)) +
+  geom_density(alpha = 0.5) +
+  theme_bw() +
+  facet_grid(plot_categories ~.)
+```
+
+```{r}
+targeted_completions <- module_completions %>%
+  
+  
+  
+```
+
+
+
+```{r}
+targeted_completions <- module_completions %>% 
+  filter(module_id %in% c("M00924")) %>% 
+  group_by(bin, module_id) %>% 
+  slice_max(percent_complete, n = 1, with_ties = FALSE)
+
+plot_data <- percent_abund %>% 
+  ungroup() %>% 
+  select(bin = genome, classification, Domain, Phylum, Class, Order, Family, Genus, Species, sample_id, transplant_type, gut_section, plot_categories, percent_abund) %>% 
+  left_join(targeted_completions)
+```
+
+
+```{r}
+plot_data %>% 
+  ggplot(aes(percent_complete, fill = plot_categories)) +
+  geom_density(alpha = 0.5) +
+  theme_bw() +
+  facet_grid(plot_categories ~.)
+```
+
+```{r}
+plot_data %>% 
+  ggplot(aes(percent_complete, percent_abund, color = plot_categories)) +
+  geom_point()
+```
+
+
+```{r}
+plot_data %>% 
+  filter(percent_complete > 75) %>% 
+  group_by(sample_id) %>% 
+  ggplot(aes(percent_abund, fill = plot_categories)) +
+  geom_density(alpha = 0.5) +
+  scale_x_log10()
+```
+
+
+
+
+
+
+

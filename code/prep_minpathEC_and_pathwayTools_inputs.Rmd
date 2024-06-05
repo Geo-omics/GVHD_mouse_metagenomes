@@ -1,0 +1,82 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+knitr::opts_knit$set(root.dir = here::here())
+```
+
+
+```{r}
+bakta_annotations <- system("ls data/omics/metagenomes/coassembly/bins/drep_ALL_SAMPLES/dereplicated_genomes/bakta/*/*.tsv", intern = TRUE) %>% 
+  data.frame(path = .) %>% 
+  filter(!str_detect(path, ".*hypotheticals.tsv")) %>% 
+  bind_cols(., unglue::unglue_data(.$path, "data/omics/metagenomes/coassembly/bins/drep_ALL_SAMPLES/dereplicated_genomes/bakta/{bin_dir}/{bin}.tsv"))
+
+make_minpath_EC_input <- function(path, bin_name){
+  df <- read_tsv(path, skip = 2,show_col_types = FALSE) %>% 
+    filter(!is.na(DbXrefs)) %>% 
+    separate_longer_delim(DbXrefs,delim = ", ") %>% 
+    separate_wider_delim(DbXrefs,delim = ":", names = c("db", "db_id")) %>% 
+    filter(db == "EC") %>% 
+    select(`Locus Tag`, db_id) %>% 
+    write_tsv(str_glue("data/omics/metagenomes/coassembly/bins/minpath/input_ec/{bin_name}.txt"),col_names = FALSE)
+  
+  return(NULL)
+  
+  }
+
+
+map2(bakta_annotations$path, bakta_annotations$bin_dir, make_minpath_EC_input)
+
+
+annotations <- map_df(bakta_annotations$path[1],read_tsv, skip = 2) %>% 
+  filter(!is.na(DbXrefs)) %>% 
+  separate_longer_delim(DbXrefs,delim = ", ") %>% 
+  separate_wider_delim(DbXrefs,delim = ":", names = c("db", "db_id")) #%>% 
+  filter(db == "EC") #%>% 
+  dplyr::select(`Locus Tag`, db_id)
+  
+
+
+```
+
+```{r}
+get_EC_annots <- function(path, bin_name){
+  df <- read_tsv(path, skip = 2,show_col_types = FALSE) %>% 
+    filter(!is.na(DbXrefs)) %>% 
+    separate_longer_delim(DbXrefs,delim = ", ") %>% 
+    separate_wider_delim(DbXrefs,delim = ":", names = c("db", "db_id")) %>% 
+    filter(db == "EC") %>% 
+    dplyr::select(`#Sequence Id`,`Locus Tag`, db_id) %>% 
+    mutate(bin = bin_name)
+}
+
+ec_annots <- map2_df(bakta_annotations$path, bakta_annotations$bin_dir, get_EC_annots) %>% 
+  write_rds("results/bin_EC_annotations.rds")
+
+```
+
+
+## Pathway tools
+```{r}
+bakta_genbankfiles <- system("ls data/omics/metagenomes/coassembly/bins/drep_ALL_SAMPLES/dereplicated_genomes/bakta/*/*.gbk", intern = TRUE) %>% 
+  data.frame(path = .) %>% 
+  cbind(., unglue::unglue_data(.$path, "data/omics/metagenomes/coassembly/bins/drep_ALL_SAMPLES/dereplicated_genomes/bakta/{bin_dir}/{bin}.gbk")) %>% 
+  mutate(new_path = str_glue("data/omics/metagenomes/coassembly/bins/pathway_tools_inputs/{bin_dir}/{bin_dir}.gbk"))
+
+bakta_genbankfiles$new_path %>% dirname() %>% map(dir.create)
+
+file.copy(bakta_genbankfiles$path, bakta_genbankfiles$new_path)
+
+tax_file <- bakta_genbankfiles %>% 
+  dplyr::select(species = "bin") %>% 
+  mutate(taxon_id = 2) %>% 
+  write_tsv("data/omics/metagenomes/coassembly/bins/pathway_tools_inputs/taxon_id.tsv")
+```
+
+
+
+

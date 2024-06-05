@@ -1,0 +1,6 @@
+channels:
+  - bioconda
+  - defaults
+  - conda-forge
+dependencies:
+  - gunc=1.0.5

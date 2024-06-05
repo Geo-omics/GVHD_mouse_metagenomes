@@ -1,0 +1,126 @@
+---
+title: "upset plot of GVHD metabolites differentially abundant between syn & allo"
+output: html_notebook
+---
+
+This 'setup' chunk gets automatically run the first time code is executed from the document
+```{r setup}
+knitr::opts_knit$set(root.dir = here::here("~/GVHD")) # this sets the working directory, would need to be changed if paths are different
+
+# Load the packages used
+library(tidyverse)
+library(UpSetR)
+```
+
+
+## Locations syn/allo
+
+Read in the metabolite table
+```{r}
+dysregulated_mets <- readxl::read_xlsx("data/metabolomics/dysregulated_mets_bylocation.xlsx")
+```
+
+Convert to a presence absence table (0/1) with groups/categories/labels as columns, and the features/genes/metabolites/etc as rows
+```{r}
+met_pres_abs <- dysregulated_mets %>% 
+  pivot_longer(everything(), names_to = "gut_section",
+               values_to = "metabolite") %>% 
+  filter(!is.na(metabolite)) %>% 
+  mutate(met_pres = 1) %>% 
+  pivot_wider(values_from = met_pres, names_from = gut_section,values_fill = 0) %>% 
+  write_tsv("data/metabolomics/dysregulated_mets_bylocation_pres_abs.tsv") %>% 
+  column_to_rownames("metabolite")
+```
+
+Make the actual plot
+```{r}
+# this and the dev.off() lines are used for saving to a pdf
+pdf(file="~/GVHD/results/dysregulated_metabolites_upset.pdf",width = 4, height = 3) # change pdf path here
+
+upset(met_pres_abs,order.by = "freq") # changed the order to be ordered by the intersection size
+
+dev.off()
+```
+
+Make as a heatmap of overlaps instead
+```{r}
+
+met_pres_abs_long <- met_pres_abs %>% 
+  rownames_to_column("met") %>% 
+  pivot_longer(-met, names_to = "gut_section", values_to = "pres")
+
+combinations <- utils::combn(colnames(met_pres_abs),2,simplify = TRUE) %>% t() %>% as.data.frame() %>% 
+  dplyr::rename(sec1 = "V1", sec2 = "V2") %>% 
+  left_join(met_pres_abs_long %>% dplyr::rename(sec1 = "gut_section", pres1 = "pres")) %>% 
+  left_join(met_pres_abs_long %>% dplyr::rename(sec2 = "gut_section", pres2 = "pres"))
+
+
+overlaps <- combinations %>% 
+  filter(pres1 == 1 & pres2 == 1) %>% 
+  group_by(sec1, sec2) %>% 
+  summarise(overlaps = n())
+
+overlaps %>% 
+  ggplot(aes(sec1, sec2, label = overlaps, fill = overlaps)) +
+  geom_tile() + 
+  geom_text(size = 6) +
+  theme_bw() +
+  scale_fill_viridis_c()
+```
+
+
+## By days & locations diff abund syn/allo
+
+Read in the metabolite table
+```{r}
+dysregulated_mets <- read_tsv("data/metabolomics/diff_abund_metabolites_by_day.txt") %>% 
+  column_to_rownames("all")
+```
+Make the actual plot
+```{r}
+# this and the dev.off() lines are used for saving to a pdf
+pdf(file="~/GVHD/results/dysregulated_metabolites_upset_by_days.pdf",width = 8, height = 5) # change pdf path here
+
+upset(dysregulated_mets,order.by = "freq",nsets = 8) # changed the order to be ordered by the intersection size
+
+dev.off()
+```
+
+Make as a heatmap of overlaps instead
+```{r}
+
+met_pres_abs_long <- dysregulated_mets %>% 
+  rownames_to_column("met") %>% 
+  pivot_longer(-met, names_to = "gut_section", values_to = "pres")
+
+combinations <- utils::combn(colnames(dysregulated_mets),2,simplify = TRUE) %>% t() %>% as.data.frame() %>% 
+  dplyr::rename(sec1 = "V1", sec2 = "V2") %>% 
+  left_join(met_pres_abs_long %>% dplyr::rename(sec1 = "gut_section", pres1 = "pres")) %>% 
+  left_join(met_pres_abs_long %>% dplyr::rename(sec2 = "gut_section", pres2 = "pres"))
+
+
+dist <- dist(dysregulated_mets %>% t()) 
+
+overlaps <- combinations %>% 
+  filter(pres1 == 1 & pres2 == 1) %>% 
+  group_by(sec1, sec2) %>% 
+  summarise(overlaps = n())
+
+diff_abund_mets_hclust <- hclust(dist)
+
+ plot(diff_abund_mets_hclust)
+
+order <- diff_abund_mets_hclust$labels[diff_abund_mets_hclust$order]
+
+overlaps %>% 
+  
+  ggplot(aes(reorder(sec1, ), relevel(as.factor(sec2),diff_abund_mets_hclust$labels[diff_abund_mets_hclust$order]), label = overlaps, fill = overlaps)) +
+  geom_tile() + 
+  geom_text(size = 6) +
+  theme_bw() +
+  scale_fill_viridis_c()
+```
+
+
+
+

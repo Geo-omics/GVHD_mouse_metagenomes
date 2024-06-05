@@ -1,0 +1,547 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = here::here())
+library(tidyverse)
+library(gage)
+source(here::here("code/funcs.R"))
+
+set.seed(2022)
+```
+
+
+```{r}
+#kegg_def <- kegg.gsets(species="ko")
+```
+
+## Starting with differentially abundant KOs from Aldex2
+
+### All samples
+#### Syn / allo
+```{r}
+koabund <- glm_res_w_ko_dfs %>% 
+  #filter(`transplant_typeAllogeneic:pval.holm` < 0.05) %>% 
+  dplyr::select(ko,`transplant_typeAllogeneic:Est`) %>% 
+    arrange(desc(`transplant_typeAllogeneic:Est`))
+
+koabund_vec <- koabund$`transplant_typeAllogeneic:Est` %>% `names<-`(koabund$ko)
+
+enriched2 <- gage(koabund_vec, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["greater"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Allogeneic")
+
+enriched2_df <- enriched2[["less"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Syngeneic") %>% 
+  bind_rows(.,enriched2_df) %>% 
+  write_tsv("results/kegg_enrichment/all_syn_vs_all_allo.tsv")
+  
+
+enriched2_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  mutate(pathway = str_remove(pathway, "^ko[0-9]*"),
+         treatment = factor(treatment, c("Syngeneic", "Allogeneic"), ordered = TRUE)) %>% 
+  ggplot(aes(stat.mean, reorder(str_wrap(pathway,40),-stat.mean),fill = treatment,alpha = p.val)) +
+  geom_bar(stat = "identity") +
+  scale_alpha_continuous(range = c(1,.2)) +
+  theme_bw() +
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0)) +
+  scale_fill_manual(values = c("#2083e6", "#f09f26")) +
+  labs(fill = "Transplant\ntype", y = "Pathway", x= "Enrichment")
+
+ggsave("results/kegg_enrichment/all_syn_vs_all_allo.pdf", width = 2, height = 3, scale = 3)
+ggsave("results/kegg_enrichment/all_syn_vs_all_allo.png", width = 2, height = 3, scale = 3)
+
+```
+
+#### Day 7/21
+
+Starting with differentially abundant KOs from Aldex2
+```{r}
+koabund <- glm_res_w_ko_dfs %>% 
+  #filter(`transplant_typeAllogeneic:pval.holm` < 0.05) %>% 
+  dplyr::select(ko,`days_after_transplant.L:Est`) %>% 
+    arrange(desc(`days_after_transplant.L:Est`))
+
+koabund_vec <- koabund$`days_after_transplant.L:Est` %>% `names<-`(koabund$ko)
+
+enriched2 <- gage(koabund_vec, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["greater"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Day 21")
+
+enriched2_df <- enriched2[["less"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Day 7") %>% 
+  bind_rows(.,enriched2_df) %>% 
+  write_tsv("results/kegg_enrichment/day7_vs_day21.tsv")
+
+enriched2_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  mutate(pathway = str_remove(pathway, "^ko[0-9]*"),
+         treatment = factor(treatment, c("Day 7", "Day 21"), ordered = TRUE)) %>%
+  ggplot(aes(stat.mean, reorder(str_wrap(pathway,40),-stat.mean),fill = treatment,alpha = p.val)) +
+  geom_bar(stat = "identity") +
+  scale_alpha_continuous(range = c(1,.2)) +
+  theme_bw() +
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0)) +
+  scale_fill_manual(values = c("#18c99a", "purple4")) +
+  labs(fill = "Days after\ntransplant", y = "Pathway", x= "Enrichment")
+
+ggsave("results/kegg_enrichment/day7_vs_day21.pdf", width = 2, height = 2 , scale = 2.5)
+ggsave("results/kegg_enrichment/day7_vs_day21.png", width = 2, height = 2, scale = 2.5)
+```
+
+
+#### Gut section
+
+Starting with differentially abundant KOs from Aldex2
+```{r}
+koabund <- glm_res_w_ko_dfs %>% 
+  #filter(`transplant_typeAllogeneic:pval.holm` < 0.05) %>% 
+  dplyr::select(ko,`gut_section.L:Est`) %>% 
+    arrange(desc(`gut_section.L:Est`))
+
+koabund_vec <- koabund$`gut_section.L:Est` %>% `names<-`(koabund$ko)
+
+enriched2 <- gage(koabund_vec, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["greater"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Distal")
+
+enriched2_df <- enriched2[["less"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Proximal") %>% 
+  bind_rows(.,enriched2_df) %>% 
+  write_tsv("results/kegg_enrichment/gut_sections_bothTreatments.tsv")
+
+enriched2_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  mutate(pathway = str_remove(pathway, "^ko[0-9]*"),
+         treatment = factor(treatment, c("Proximal", "Distal"), ordered = TRUE)) %>%
+  ggplot(aes(stat.mean, reorder(str_wrap(pathway,40),-stat.mean),fill = treatment,alpha = p.val)) +
+  geom_bar(stat = "identity") +
+  scale_alpha_continuous(range = c(1,.2)) +
+  theme_bw() +
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0)) +
+  scale_fill_manual(values = c("#246635", "chocolate4")) +
+  labs(fill = "Gut location", y = "Pathway", x= "Enrichment")
+
+ggsave("results/kegg_enrichment/gut_sections_bothTreatments.pdf", width = 2.5, height = 3 , scale = 2.5)
+ggsave("results/kegg_enrichment/gut_sections_bothTreatments.png", width = 2.5, height = 3, scale = 2.5)
+```
+
+### Day 7 samples
+
+#### Syn / allo
+```{r}
+koabund <- glm_res_w_ko_dfs_day7 %>% 
+  #filter(`transplant_typeAllogeneic:pval.holm` < 0.05) %>% 
+  dplyr::select(ko,`transplant_typeAllogeneic:Est`) %>% 
+    arrange(desc(`transplant_typeAllogeneic:Est`))
+
+koabund_vec <- koabund$`transplant_typeAllogeneic:Est` %>% `names<-`(koabund$ko)
+
+enriched2 <- gage(koabund_vec, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["greater"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Allogeneic")
+
+enriched2_df <- enriched2[["less"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Syngeneic") %>% 
+  bind_rows(.,enriched2_df) %>% 
+  write_tsv("results/kegg_enrichment/Day7_syn_vs_all_allo.tsv")
+  
+
+enriched2_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  mutate(pathway = str_remove(pathway, "^ko[0-9]*"),
+         treatment = factor(treatment, c("Syngeneic", "Allogeneic"), ordered = TRUE)) %>% 
+  ggplot(aes(stat.mean, reorder(str_wrap(pathway,40),-stat.mean),fill = treatment,alpha = p.val)) +
+  geom_bar(stat = "identity") +
+  scale_alpha_continuous(range = c(1,.2)) +
+  theme_bw() +
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0)) +
+  scale_fill_manual(values = c("#2083e6", "#f09f26")) +
+  labs(fill = "Transplant\ntype", y = "Pathway", x= "Enrichment")
+
+ggsave("results/kegg_enrichment/Day7_syn_vs_allo.pdf", width = 2, height = 3, scale = 3)
+ggsave("results/kegg_enrichment/Day7_syn_vs_allo.png", width = 2, height = 3, scale = 3)
+
+```
+
+#### Gut section
+
+```{r}
+koabund <- glm_res_w_ko_dfs_day7 %>% 
+  #filter(`transplant_typeAllogeneic:pval.holm` < 0.05) %>% 
+  dplyr::select(ko,`gut_section.L:Est`) %>% 
+    arrange(desc(`gut_section.L:Est`))
+
+koabund_vec <- koabund$`gut_section.L:Est` %>% `names<-`(koabund$ko)
+
+enriched2 <- gage(koabund_vec, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["greater"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Distal")
+
+enriched2_df <- enriched2[["less"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Proximal") %>% 
+  bind_rows(.,enriched2_df) %>% 
+  write_tsv("results/kegg_enrichment/gut_sections_Day7_bothTreatments.tsv")
+
+enriched2_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  mutate(pathway = str_remove(pathway, "^ko[0-9]*"),
+         treatment = factor(treatment, c("Proximal", "Distal"), ordered = TRUE)) %>%
+  ggplot(aes(stat.mean, reorder(str_wrap(pathway,40),-stat.mean),fill = treatment,alpha = p.val)) +
+  geom_bar(stat = "identity") +
+  scale_alpha_continuous(range = c(1,.2)) +
+  theme_bw() +
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0)) +
+  scale_fill_manual(values = c("#246635", "chocolate4")) +
+  labs(fill = "Gut location", y = "Pathway", x= "Enrichment")
+
+ggsave("results/kegg_enrichment/gut_sections_Day7_bothTreatments.pdf", width = 2.5, height = 3 , scale = 2.5)
+ggsave("results/kegg_enrichment/gut_sections_Day7_bothTreatments.png", width = 2.5, height = 3, scale = 2.5)
+```
+
+### Day 21 samples
+
+#### Syn / allo
+```{r}
+koabund <- glm_res_w_ko_dfs_day21 %>% 
+  #filter(`transplant_typeAllogeneic:pval.holm` < 0.05) %>% 
+  dplyr::select(ko,`transplant_typeAllogeneic:Est`) %>% 
+    arrange(desc(`transplant_typeAllogeneic:Est`))
+
+koabund_vec <- koabund$`transplant_typeAllogeneic:Est` %>% `names<-`(koabund$ko)
+
+enriched2 <- gage(koabund_vec, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["greater"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Allogeneic")
+
+enriched2_df <- enriched2[["less"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Syngeneic") %>% 
+  bind_rows(.,enriched2_df) %>% 
+  write_tsv("results/kegg_enrichment/Day21_syn_vs_all_allo.tsv")
+  
+
+enriched2_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  mutate(pathway = str_remove(pathway, "^ko[0-9]*"),
+         treatment = factor(treatment, c("Syngeneic", "Allogeneic"), ordered = TRUE)) %>% 
+  ggplot(aes(stat.mean, reorder(str_wrap(pathway,40),-stat.mean),fill = treatment,alpha = p.val)) +
+  geom_bar(stat = "identity") +
+  scale_alpha_continuous(range = c(1,.2)) +
+  theme_bw() +
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0)) +
+  scale_fill_manual(values = c("#2083e6", "#f09f26")) +
+  labs(fill = "Transplant\ntype", y = "Pathway", x= "Enrichment")
+
+ggsave("results/kegg_enrichment/Day21_syn_vs_allo.pdf", width = 2, height = 3, scale = 3)
+ggsave("results/kegg_enrichment/Day21_syn_vs_allo.png", width = 2, height = 3, scale = 3)
+
+```
+
+#### Gut section
+
+```{r}
+koabund <- glm_res_w_ko_dfs_day21 %>% 
+  #filter(`transplant_typeAllogeneic:pval.holm` < 0.05) %>% 
+  dplyr::select(ko,`gut_section.L:Est`) %>% 
+    arrange(desc(`gut_section.L:Est`))
+
+koabund_vec <- koabund$`gut_section.L:Est` %>% `names<-`(koabund$ko)
+
+enriched2 <- gage(koabund_vec, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["greater"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Distal")
+
+enriched2_df <- enriched2[["less"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Proximal") %>% 
+  bind_rows(.,enriched2_df) %>% 
+  write_tsv("results/kegg_enrichment/gut_sections_bothTreatments.tsv")
+
+enriched2_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  mutate(pathway = str_remove(pathway, "^ko[0-9]*"),
+         treatment = factor(treatment, c("Proximal", "Distal"), ordered = TRUE)) %>%
+  ggplot(aes(stat.mean, reorder(str_wrap(pathway,40),-stat.mean),fill = treatment,alpha = p.val)) +
+  geom_bar(stat = "identity") +
+  scale_alpha_continuous(range = c(1,.2)) +
+  theme_bw() +
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0)) +
+  scale_fill_manual(values = c("#246635", "chocolate4")) +
+  labs(fill = "Gut location", y = "Pathway", x= "Enrichment")
+
+ggsave("results/kegg_enrichment/gut_sections_Day21_bothTreatments.pdf", width = 2.5, height = 3 , scale = 2.5)
+ggsave("results/kegg_enrichment/gut_sections_Day21_bothTreatments.png", width = 2.5, height = 3, scale = 2.5)
+```
+### Allo samples
+
+#### Days
+```{r}
+koabund <- glm_res_w_ko_dfs_allo %>% 
+  #filter(`transplant_typeAllogeneic:pval.holm` < 0.05) %>% 
+  dplyr::select(ko,`days_after_transplant.L:Est`) %>% 
+    arrange(desc(`days_after_transplant.L:Est`))
+
+koabund_vec <- koabund$`days_after_transplant.L:Est` %>% `names<-`(koabund$ko)
+
+enriched2 <- gage(koabund_vec, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["greater"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Day 21")
+
+enriched2_df <- enriched2[["less"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Day 7") %>% 
+  bind_rows(.,enriched2_df) %>% 
+  write_tsv("results/kegg_enrichment/Allo_day7_vs_day21.tsv")
+  
+
+enriched2_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  mutate(pathway = str_remove(pathway, "^ko[0-9]*"),
+         treatment = factor(treatment, c("Day 7", "Day 21"), ordered = TRUE)) %>% 
+  ggplot(aes(stat.mean, reorder(str_wrap(pathway,40),-stat.mean),fill = treatment,alpha = p.val)) +
+  geom_bar(stat = "identity") +
+  scale_alpha_continuous(range = c(1,.2)) +
+  theme_bw() +
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0)) +
+  scale_fill_manual(values = c("#18c99a", "purple4")) +
+  labs(fill = "Days after\ntransplant", y = "Pathway", x= "Enrichment")
+
+ggsave("results/kegg_enrichment/Allo_day7_vs_day21.pdf", width = 2, height = 3, scale = 3)
+ggsave("results/kegg_enrichment/Allo_day7_vs_day21.png", width = 2, height = 3, scale = 3)
+
+```
+
+#### Gut section
+```{r}
+koabund <- glm_res_w_ko_dfs_allo %>% 
+  #filter(`transplant_typeAllogeneic:pval.holm` < 0.05) %>% 
+  dplyr::select(ko,`gut_section.L:Est`) %>% 
+    arrange(desc(`gut_section.L:Est`))
+
+koabund_vec <- koabund$`gut_section.L:Est` %>% `names<-`(koabund$ko)
+
+enriched2 <- gage(koabund_vec, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["greater"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Distal")
+
+enriched2_df <- enriched2[["less"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Proximal") %>% 
+  bind_rows(.,enriched2_df) %>% 
+  write_tsv("results/kegg_enrichment/Allo_gut_section.tsv")
+  
+
+enriched2_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  mutate(pathway = str_remove(pathway, "^ko[0-9]*"),
+         treatment = factor(treatment, c("Proximal", "Distal"), ordered = TRUE)) %>% 
+  ggplot(aes(stat.mean, reorder(str_wrap(pathway,40),-stat.mean),fill = treatment,alpha = p.val)) +
+  geom_bar(stat = "identity") +
+  scale_alpha_continuous(range = c(1,.2)) +
+  theme_bw() +
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0)) +
+  scale_fill_manual(values = c("#246635", "chocolate4")) +
+  labs(fill = "Gut location", y = "Pathway", x= "Enrichment")
+
+ggsave("results/kegg_enrichment/Allo_gut_section.pdf", width = 2, height = 3, scale = 3)
+ggsave("results/kegg_enrichment/Allo_gut_section.png", width = 2, height = 3, scale = 3)
+
+```
+
+
+### Syn samples
+#### Days
+```{r}
+koabund <- glm_res_w_ko_dfs_syn %>% 
+  #filter(`transplant_typeAllogeneic:pval.holm` < 0.05) %>% 
+  dplyr::select(ko,`days_after_transplant.L:Est`) %>% 
+    arrange(desc(`days_after_transplant.L:Est`))
+
+koabund_vec <- koabund$`days_after_transplant.L:Est` %>% `names<-`(koabund$ko)
+
+enriched2 <- gage(koabund_vec, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["greater"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Day 21")
+
+enriched2_df <- enriched2[["less"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Day 7") %>% 
+  bind_rows(.,enriched2_df) %>% 
+  write_tsv("results/kegg_enrichment/Syn_day7_vs_day21.tsv")
+  
+
+enriched2_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  mutate(pathway = str_remove(pathway, "^ko[0-9]*"),
+         treatment = factor(treatment, c("Day 7", "Day 21"), ordered = TRUE)) %>% 
+  ggplot(aes(stat.mean, reorder(str_wrap(pathway,40),-stat.mean),fill = treatment,alpha = p.val)) +
+  geom_bar(stat = "identity") +
+  scale_alpha_continuous(range = c(1,.2)) +
+  theme_bw() +
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0)) +
+  scale_fill_manual(values = c("#18c99a", "purple4")) +
+  labs(fill = "Days after\ntransplant", y = "Pathway", x= "Enrichment")
+
+ggsave("results/kegg_enrichment/Syn_day7_vs_day21.pdf", width = 2, height = 3, scale = 3)
+ggsave("results/kegg_enrichment/Syn_day7_vs_day21.png", width = 2, height = 3, scale = 3)
+
+```
+
+#### Gut section
+```{r}
+koabund <- glm_res_w_ko_dfs_syn %>% 
+  #filter(`transplant_typeAllogeneic:pval.holm` < 0.05) %>% 
+  dplyr::select(ko,`gut_section.L:Est`) %>% 
+    arrange(desc(`gut_section.L:Est`))
+
+koabund_vec <- koabund$`gut_section.L:Est` %>% `names<-`(koabund$ko)
+
+enriched2 <- gage(koabund_vec, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["greater"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Distal")
+
+enriched2_df <- enriched2[["less"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway") %>% 
+  mutate(treatment = "Proximal") %>% 
+  bind_rows(.,enriched2_df) %>% 
+  write_tsv("results/kegg_enrichment/Syn_gut_section.tsv")
+  
+
+enriched2_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  mutate(pathway = str_remove(pathway, "^ko[0-9]*"),
+         treatment = factor(treatment, c("Proximal", "Distal"), ordered = TRUE)) %>% 
+  ggplot(aes(stat.mean, reorder(str_wrap(pathway,40),-stat.mean),fill = treatment,alpha = p.val)) +
+  geom_bar(stat = "identity") +
+  scale_alpha_continuous(range = c(1,.2)) +
+  theme_bw() +
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0)) +
+  scale_fill_manual(values = c("#246635", "chocolate4")) +
+  labs(fill = "Gut location", y = "Pathway", x= "Enrichment")
+
+ggsave("results/kegg_enrichment/Syn_gut_section.pdf", width = 2, height = 3, scale = 3)
+ggsave("results/kegg_enrichment/Syn_gut_section.png", width = 2, height = 3, scale = 3)
+
+```
+
+
+Starting with differentially abundant KOs from Aldex2
+```{r}
+koabund <- glm_res_w_ko_dfs %>% 
+  filter(`gut_section.L:pval.holm` < 0.05) %>% 
+  dplyr::select(ko,`gut_section.L:Est`) %>% 
+    arrange(desc(`gut_section.L:Est`))
+
+koabund_vec <- koabund$`gut_section.L:Est` %>% `names<-`(koabund$ko)
+
+enriched2 <- gage(koabund_vec, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["less"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway")
+
+enriched2_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  ggplot(aes(abs(stat.mean), reorder(str_wrap(pathway,20),abs(stat.mean)))) +
+  geom_bar(stat = "identity") +
+  theme_bw() #+
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0))
+
+
+BiocManager::install("pathview")
+
+```
+
+Starting with differentially abundant KOs from POMS
+```{r}
+poms_diff <- POMS_result_df %>% 
+  filter(multinomial_p < 0.05,
+        group_diff > 0) %>% 
+  arrange(group_diff)
+
+koabund_vec <- poms_diff$group_diff %>% `names<-`(poms_diff$ko)
+
+enriched2 <- gage(koabund_vec, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["less"]] %>% as.data.frame() %>% 
+  rownames_to_column("pathway")
+
+enriched2_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  ggplot(aes(abs(stat.mean), reorder(str_wrap(pathway,20),abs(stat.mean)))) +
+  geom_bar(stat = "identity") +
+  theme_bw() #+
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0))
+
+kegg_test <- clusterProfiler::gseKEGG(koabund_for_cp, organism = "ko")
+
+```
+
+
+
+Working directly with ko abundance
+```{r}
+ko_abund_wide <- ko_abund_mat %>% 
+  pivot_wider(names_from = sample, values_from = ko_abund,values_fill = 0) %>% 
+  column_to_rownames("ko") %>% 
+  as.matrix() 
+
+syn <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                             filter(transplant_type == "Syngeneic") %>% 
+                                             pull("sample"))) %>% as.numeric()
+
+allo <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                              filter(transplant_type == "Allogeneic") %>% 
+                                              pull("sample"))) %>% as.numeric()
+
+enriched_allo <- gage(ko_abund_wide, gsets = kegg_def$kg.sets, ref = syn, samp = allo,species = "ko",compare = "unpaired",rank.test = TRUE)
+
+enriched_allo_df <- enriched_allo[["greater"]] %>% as.data.frame()
+```
+
+
+
+

@@ -1,0 +1,53 @@
+sample_id	file_id	researcher_sample_id	transplant_type	gut_section	n_mice_in_group	days_after_transplant	acid_water_administered
+S107	Sample_3728-EL-1	A1_TI	Allogeneic	Terminal ileum 	5	7	Y
+S108	Sample_3728-EL-2	A1_Ce	Allogeneic	Cecum	5	7	Y
+S109	Sample_3728-EL-3	A1_TC	Allogeneic	Transverse Colon	5	7	Y
+S110	Sample_3728-EL-4	A1_DC	Allogeneic	Descending Colon	5	7	Y
+S111	Sample_3728-EL-5	A2_TI	Allogeneic	Terminal ileum 	5	7	Y
+S112	Sample_3728-EL-6	A2_Ce	Allogeneic	Cecum	5	7	Y
+S113	Sample_3728-EL-7	A2_TC	Allogeneic	Transverse Colon	5	7	Y
+S114	Sample_3728-EL-8	A2_DC	Allogeneic	Descending Colon	5	7	Y
+S115	Sample_3728-EL-9	A3_TI	Allogeneic	Terminal ileum 	5	7	Y
+S116	Sample_3728-EL-10	A3_Ce	Allogeneic	Cecum	5	7	Y
+S117	Sample_3728-EL-11	A3_TC	Allogeneic	Transverse Colon	5	7	Y
+S118	Sample_3728-EL-12	A3_DC	Allogeneic	Descending Colon	5	7	Y
+S119	Sample_3728-EL-13	21A1_TI	Allogeneic	Terminal ileum 	4	21	Y
+S120	Sample_3728-EL-14	21A1_Ce	Allogeneic	Cecum	4	21	Y
+S121	Sample_3728-EL-15	21A1_TC	Allogeneic	Transverse Colon	4	21	Y
+S122	Sample_3728-EL-16	21A1_DC	Allogeneic	Descending Colon	4	21	Y
+S123	Sample_3728-EL-17	21A2_TI	Allogeneic	Terminal ileum 	4	21	Y
+S124	Sample_3728-EL-18	21A2_Ce	Allogeneic	Cecum	4	21	Y
+S125	Sample_3728-EL-19	21A2_TC	Allogeneic	Transverse Colon	4	21	Y
+S126	Sample_3728-EL-20	21A2_DC	Allogeneic	Descending Colon	4	21	Y
+S127	Sample_3728-EL-21	21A3_TI	Allogeneic	Terminal ileum 	4	21	Y
+S128	Sample_3728-EL-22	21A3_Ce	Allogeneic	Cecum	4	21	Y
+S129	Sample_3728-EL-23	21A3_TC	Allogeneic	Transverse Colon	4	21	Y
+S130	Sample_3728-EL-24	21A3_DC	Allogeneic	Descending Colon	4	21	Y
+S131	Sample_3728-EL-25	S1_TI	Syngeneic 	Terminal ileum 	5	7	Y
+S132	Sample_3728-EL-26	S1_Ce	Syngeneic 	Cecum	5	7	Y
+S133	Sample_3728-EL-27	S1_TC	Syngeneic 	Transverse Colon	5	7	Y
+S134	Sample_3728-EL-28	S1_DC	Syngeneic 	Descending Colon	5	7	Y
+S135	Sample_3728-EL-29	S2_TI	Syngeneic 	Terminal ileum 	5	7	Y
+S136	Sample_3728-EL-30	S2_Ce	Syngeneic 	Cecum	5	7	Y
+S137	Sample_3728-EL-31	S2_TC	Syngeneic 	Transverse Colon	5	7	Y
+S138	Sample_3728-EL-32	S2_DC	Syngeneic 	Descending Colon	5	7	Y
+S139	Sample_3728-EL-33	S3_TI	Syngeneic 	Terminal ileum 	5	7	Y
+S140	Sample_3728-EL-34	S3_Ce	Syngeneic 	Cecum	5	7	Y
+S141	Sample_3728-EL-35	S3_TC	Syngeneic 	Transverse Colon	5	7	Y
+S142	Sample_3728-EL-36	S3_DC	Syngeneic 	Descending Colon	5	7	Y
+S143	Sample_3728-EL-37	21S1_TI	Syngeneic 	Terminal ileum 	4	21	Y
+S144	Sample_3728-EL-38	21S1_Ce	Syngeneic 	Cecum	4	21	Y
+S145	Sample_3728-EL-39	21S1_TC	Syngeneic 	Transverse Colon	4	21	Y
+S146	Sample_3728-EL-40	21S1_DC	Syngeneic 	Descending Colon	4	21	Y
+S147	Sample_3728-EL-41	21S2_TI	Syngeneic 	Terminal ileum 	5	21	Y
+S148	Sample_3728-EL-42	21S2_Ce	Syngeneic 	Cecum	5	21	Y
+S149	Sample_3728-EL-43	21S2_TC	Syngeneic 	Transverse Colon	5	21	Y
+S150	Sample_3728-EL-44	21S2_DC	Syngeneic 	Descending Colon	5	21	Y
+S151	Sample_3728-EL-45	21S3_TI	Syngeneic 	Terminal ileum 	5	21	Y
+S152	Sample_3728-EL-46	21S3_Ce	Syngeneic 	Cecum	5	21	Y
+S153	Sample_3728-EL-47	21S3_TC	Syngeneic 	Transverse Colon	5	21	Y
+S154	Sample_3728-EL-48	21S3_DC	Syngeneic 	Descending Colon	5	21	Y
+S155	Sample_3728-EL-49	N_TI	Na夫e	Terminal ileum 	3	N/A	N
+S156	Sample_3728-EL-50	N_Ce	Na夫e	Cecum	3	N/A	N
+S157	Sample_3728-EL-51	N_TC	Na夫e	Transverse Colon	3	N/A	N
+S158	Sample_3728-EL-52	N_DC	Na夫e	Descending Colon	3	N/A	N

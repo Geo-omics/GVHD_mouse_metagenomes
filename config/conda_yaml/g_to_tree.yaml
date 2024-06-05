@@ -1,0 +1,8 @@
+name: g-to-tree
+channels:
+  - astrobiomike
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - gtotree=1.7.08

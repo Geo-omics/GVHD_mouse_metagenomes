@@ -1,0 +1,4200 @@
+---
+title: "Functional profiling"
+editor_options: 
+  chunk_output_type: console
+---
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = here::here())
+library(ALDEx2)
+library(tidyverse)
+library(gage)
+conflicted::conflicts_prefer(dplyr::select(),dplyr::filter())
+source(here::here("code/funcs.R"))
+
+
+str_wrap_factor <- function(x, ...) {
+  levels(x) <- str_wrap(levels(x), ...)
+  x
+}
+```
+
+# Humann3 annotations analysis
+## Pathway diff abund
+### Syn vs. allo
+```{r}
+metadata <- read_metaG_metadata()
+
+
+if(!file.exists("results/functional/data/pathway_abundance.tsv")){
+  pathway_abund_files <- system("ls data/omics/metagenomes/*/humann_fastp/*_humann_pathabundance.tsv",intern = TRUE) %>% 
+    data.frame(file = .) %>% 
+    mutate(sample = str_remove(file,"data/omics/metagenomes/.*/humann_fastp/") %>% str_remove("_humann_pathabundance.tsv")) %>% 
+    filter(str_detect(file, "fastp"))
+  
+  path_abund <- read_tsv(pathway_abund_files$file[1])
+  
+  for (file in pathway_abund_files$file[2:nrow(pathway_abund_files)]){
+    new_file <- suppressMessages(read_tsv(file))
+    path_abund <- path_abund %>% full_join(new_file) %>% rename_all(~str_remove(.x,"_humann_Abundance"))
+  }
+  
+  path_abund <- path_abund %>% 
+    dplyr::rename(pathway = "# Pathway") %>% 
+    mutate(across(where(is.numeric), ~replace_na(.x, 0))) %>% 
+    write_tsv("results/functional/data/pathway_abundance.tsv")
+} else {
+  path_abund <- read_tsv("results/functional/data/pathway_abundance.tsv")
+}
+
+
+path_abund_notax <- path_abund %>% 
+  dplyr::filter(!str_detect(pathway,"\\|")) %>% 
+  group_by(pathway) %>% 
+  summarise(across(any_of(metadata$sample), ~ sum(.x))) %>% 
+  column_to_rownames("pathway") %>% 
+  mutate(across(everything(),~replace_na(.x,0)))
+
+path_abund_notax %>% rownames_to_column("pathway") %>% 
+  write_tsv("results/functional/data/pathway_abundance_without_taxonomy.tsv")
+
+## Scale to counts, with minimum of 1 count
+min_abund <- min(path_abund_notax[path_abund_notax > 0])
+path_abund_notax <- path_abund_notax * 1 / min_abund
+path_abund_notax <- round(path_abund_notax)
+
+
+SynAllo_metadata <- metadata %>%
+  filter(sample %in% colnames(path_abund)) %>% 
+  column_to_rownames("sample") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  mutate(transplant_type = factor(transplant_type,levels = c("Syngeneic","Allogeneic"),ordered = TRUE))
+
+aldex_path_abund <- path_abund_notax[,rownames(SynAllo_metadata)]
+
+treatments <- SynAllo_metadata %>% pull("transplant_type")
+
+if(!file.exists("results/functional/data/differentially_abundant_pathways_syn_vs_allo_all_samples.tsv")){
+
+  aldex_out_path <- ALDEx2::aldex(aldex_path_abund, treatments, mc.samples=1000, test="t", include.sample.summary=FALSE, verbose=FALSE, denom = "all",effect = TRUE)
+
+  signif_aldex_out_path <- aldex_out_path %>% 
+    rownames_to_column("pathway") %>% 
+    write_tsv("results/functional/data/differentially_abundant_pathways_syn_vs_allo_all_samples.tsv") %>% 
+    filter(we.ep <= 0.05)
+
+} else {
+  aldex_out_path <- read_tsv("results/functional/data/differentially_abundant_pathways_syn_vs_allo_all_samples.tsv")
+  
+  signif_aldex_out_path <- aldex_out_path %>% 
+    filter(we.ep <= 0.05)
+}
+
+```
+
+Plot of pathways differentially abundant in Allogeneic & Syngeneic samples with effect sizes greater than 1
+```{r}
+allo_paths <- signif_aldex_out_path %>% filter(effect > 1) %>% top_n(20,effect) %>% mutate(type = "Allogeneic",color = "orange")
+syn_paths <- signif_aldex_out_path %>% filter(effect < -1) %>% top_n(20,-effect) %>% mutate(type = "Syngeneic",color = "blue")
+
+plot_paths <- bind_rows(allo_paths,syn_paths)
+
+(SynAllo_pathways <- plot_paths %>% ggplot(aes(reorder(pathway,effect), effect, fill = color)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_identity(guide = "legend", labels = plot_paths$type, breaks = plot_paths$color) +
+  labs(x = NULL, fill = NULL) +
+  theme_bw()
+  #theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0)) 
+)
+  
+ggsave("results/functional/figures/SynAllo_pathways.png",SynAllo_pathways,width = 5, height = 3.5, dpi = 600, scale = 2)
+```
+
+### Kruskal test between sites
+
+```{r}
+ long_path_abund <- path_abund_notax %>% 
+  rownames_to_column("pathway") %>% 
+  pivot_longer(any_of(metadata$sample), names_to = "sample", values_to = "abund") %>% 
+  left_join(metadata)
+
+nested_long_path_abund <- long_path_abund %>% 
+  filter(days_after_transplant == 21,
+         transplant_type %in% c("Syngeneic", "Allogeneic")) %>% 
+  group_by(pathway) %>% 
+  nest() %>% 
+  rowwise() %>% 
+  mutate(kuskal = list(kruskal.test(abund ~ gut_section, data = data)),
+         kruskal_p = kuskal$p.value, 
+         pairwise.wilcox = list(pairwise.wilcox.test(data$abund, data$gut_section,
+                 p.adjust.method = "BH")),
+         pairwise_res = list(broom::tidy(pairwise.wilcox)))
+
+pathway_kruskal_p <- data.frame(pathway = nested_long_path_abund$pathway,
+                                p.value = nested_long_path_abund$kruskal_p) %>% 
+  write_tsv("results/functional/pathway_kruskal_p_values.tsv")
+
+unnested_long_path_abund <- nested_long_path_abund %>% 
+  unnest(pairwise_res) %>% 
+  select(pathway, group1, group2, p.value) %>% 
+  write_tsv("results/functional/pairwise_wilcox_day21_pathway_abund_diffs_between_gut_locations.tsv")
+
+
+```
+
+
+
+### Terminal ileum day 21
+
+```{r}
+gut_sec <- "Terminal ileum"
+days <- 21
+
+SynAllo_metadata <- metadata %>%
+  filter(sample %in% colnames(path_abund),
+         gut_section == gut_sec,
+         days_after_transplant == days) %>% 
+  column_to_rownames("sample") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  mutate(transplant_type = factor(transplant_type,levels = c("Syngeneic","Allogeneic"),ordered = TRUE))
+
+aldex_path_abund <- path_abund_notax[,rownames(SynAllo_metadata)]
+
+treatments <- SynAllo_metadata %>% pull("transplant_type")
+
+if(!file.exists(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv"))){
+
+  aldex_out_path <- ALDEx2::aldex(aldex_path_abund, treatments, mc.samples=1000, test="t", include.sample.summary=FALSE, verbose=FALSE, denom = "all",effect = TRUE)
+
+  signif_aldex_out_path <- aldex_out_path %>% 
+    rownames_to_column("pathway") %>% 
+    write_tsv(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv")) %>% 
+    filter(we.ep <= 0.05)
+
+} else {
+  aldex_out_path <- read_tsv(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv"))
+  
+  signif_aldex_out_path <- aldex_out_path %>% 
+    filter(we.ep <= 0.05)
+}
+
+allo_paths <- signif_aldex_out_path %>% filter(effect > 1) %>% top_n(20,effect) %>% mutate(type = "Allogeneic",color = "orange")
+syn_paths <- signif_aldex_out_path %>% filter(effect < -1) %>% top_n(20,-effect) %>% mutate(type = "Syngeneic",color = "blue")
+
+plot_paths <- bind_rows(allo_paths,syn_paths)
+
+(SynAllo_pathways <- plot_paths %>% ggplot(aes(reorder(pathway,effect), effect, fill = color)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_identity(guide = "legend", labels = plot_paths$type, breaks = plot_paths$color) +
+  labs(x = NULL, fill = NULL) +
+  theme_bw()
+  #theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0)) 
+)
+  
+ggsave(paste0("results/functional/figures/SynAllo_pathways_",gut_sec,"_",days,".png"),SynAllo_pathways,width = 5, height = 3.5, dpi = 600, scale = 2)
+```
+
+
+### Cecum day 21
+
+```{r}
+gut_sec <- "Cecum"
+days <- 21
+
+SynAllo_metadata <- metadata %>%
+  filter(sample %in% colnames(path_abund),
+         gut_section == gut_sec,
+         days_after_transplant == days) %>% 
+  column_to_rownames("sample") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  mutate(transplant_type = factor(transplant_type,levels = c("Syngeneic","Allogeneic"),ordered = TRUE))
+
+aldex_path_abund <- path_abund_notax[,rownames(SynAllo_metadata)]
+
+treatments <- SynAllo_metadata %>% pull("transplant_type")
+
+if(!file.exists(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv"))){
+
+  aldex_out_path <- ALDEx2::aldex(aldex_path_abund, treatments, mc.samples=1000, test="t", include.sample.summary=FALSE, verbose=FALSE, denom = "all",effect = TRUE)
+
+  signif_aldex_out_path <- aldex_out_path %>% 
+    rownames_to_column("pathway") %>% 
+    write_tsv(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv")) %>% 
+    filter(we.ep <= 0.05)
+
+} else {
+  aldex_out_path <- read_tsv(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv"))
+  
+  signif_aldex_out_path <- aldex_out_path %>% 
+    filter(we.ep <= 0.05)
+}
+
+allo_paths <- signif_aldex_out_path %>% filter(effect > 1) %>% top_n(20,effect) %>% mutate(type = "Allogeneic",color = "orange")
+syn_paths <- signif_aldex_out_path %>% filter(effect < -1) %>% top_n(20,-effect) %>% mutate(type = "Syngeneic",color = "blue")
+
+plot_paths <- bind_rows(allo_paths,syn_paths)
+
+(SynAllo_pathways <- plot_paths %>% ggplot(aes(reorder(pathway,effect), effect, fill = color)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_identity(guide = "legend", labels = plot_paths$type, breaks = plot_paths$color) +
+  labs(x = NULL, fill = NULL) +
+  theme_bw()
+  #theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0)) 
+)
+  
+ggsave(paste0("results/functional/figures/SynAllo_pathways_",gut_sec,"_",days,".png"),SynAllo_pathways,width = 5, height = 3.5, dpi = 600, scale = 2)
+```
+
+
+### Transverse Colon day 21
+
+```{r}
+gut_sec <- "Transverse Colon"
+days <- 21
+
+SynAllo_metadata <- metadata %>%
+  filter(sample %in% colnames(path_abund),
+         gut_section == gut_sec,
+         days_after_transplant == days) %>% 
+  column_to_rownames("sample") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  mutate(transplant_type = factor(transplant_type,levels = c("Syngeneic","Allogeneic"),ordered = TRUE))
+
+aldex_path_abund <- path_abund_notax[,rownames(SynAllo_metadata)]
+
+treatments <- SynAllo_metadata %>% pull("transplant_type")
+
+if(!file.exists(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv"))){
+
+  aldex_out_path <- ALDEx2::aldex(aldex_path_abund, treatments, mc.samples=1000, test="t", include.sample.summary=FALSE, verbose=FALSE, denom = "all",effect = TRUE)
+
+  signif_aldex_out_path <- aldex_out_path %>% 
+    rownames_to_column("pathway") %>% 
+    write_tsv(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv")) %>% 
+    filter(we.ep <= 0.05)
+
+} else {
+  aldex_out_path <- read_tsv(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv"))
+  
+  signif_aldex_out_path <- aldex_out_path %>% 
+    filter(we.ep <= 0.05)
+}
+
+allo_paths <- signif_aldex_out_path %>% filter(effect > 1) %>% top_n(20,effect) %>% mutate(type = "Allogeneic",color = "orange")
+syn_paths <- signif_aldex_out_path %>% filter(effect < -1) %>% top_n(20,-effect) %>% mutate(type = "Syngeneic",color = "blue")
+
+plot_paths <- bind_rows(allo_paths,syn_paths)
+
+(SynAllo_pathways <- plot_paths %>% ggplot(aes(reorder(pathway,effect), effect, fill = color)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_identity(guide = "legend", labels = plot_paths$type, breaks = plot_paths$color) +
+  labs(x = NULL, fill = NULL) +
+  theme_bw()
+  #theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0)) 
+)
+  
+ggsave(paste0("results/functional/figures/SynAllo_pathways_",gut_sec,"_",days,".png"),SynAllo_pathways,width = 5, height = 3.5, dpi = 600, scale = 2)
+```
+
+### Descending colon day 21
+
+```{r}
+gut_sec <- "Descending Colon"
+days <- 21
+
+SynAllo_metadata <- metadata %>%
+  filter(sample %in% colnames(path_abund),
+         gut_section == gut_sec,
+         days_after_transplant == days) %>% 
+  column_to_rownames("sample") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  mutate(transplant_type = factor(transplant_type,levels = c("Syngeneic","Allogeneic"),ordered = TRUE))
+
+aldex_path_abund <- path_abund_notax[,rownames(SynAllo_metadata)]
+
+treatments <- SynAllo_metadata %>% pull("transplant_type")
+
+if(!file.exists(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv"))){
+
+  aldex_out_path <- ALDEx2::aldex(aldex_path_abund, treatments, mc.samples=1000, test="t", include.sample.summary=FALSE, verbose=FALSE, denom = "all",effect = TRUE)
+
+  signif_aldex_out_path <- aldex_out_path %>% 
+    rownames_to_column("pathway") %>% 
+    write_tsv(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv")) %>% 
+    filter(we.ep <= 0.05)
+
+} else {
+  aldex_out_path <- read_tsv(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv"))
+  
+  signif_aldex_out_path <- aldex_out_path %>% 
+    filter(we.ep <= 0.05)
+}
+
+allo_paths <- signif_aldex_out_path %>% filter(effect > 1) %>% top_n(20,effect) %>% mutate(type = "Allogeneic",color = "orange")
+syn_paths <- signif_aldex_out_path %>% filter(effect < -1) %>% top_n(20,-effect) %>% mutate(type = "Syngeneic",color = "blue")
+
+plot_paths <- bind_rows(allo_paths,syn_paths)
+
+(SynAllo_pathways <- plot_paths %>% ggplot(aes(reorder(pathway,effect), effect, fill = color)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_identity(guide = "legend", labels = plot_paths$type, breaks = plot_paths$color) +
+  labs(x = NULL, fill = NULL) +
+  theme_bw()
+  #theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0)) 
+)
+  
+ggsave(paste0("results/functional/figures/SynAllo_pathways_",gut_sec,"_",days,".png"),SynAllo_pathways,width = 5, height = 3.5, dpi = 600, scale = 2)
+```
+
+
+## GO term abundance via UniRef gene annotations
+
+```{r}
+# Load GO mapping infomation
+if(!file.exists("data/reference/humann_map/go_map.rds")){
+  go_map_wide <- read_tsv("data/reference/humann_map2/map_go_uniref90.txt.gz",col_names = FALSE) 
+  
+  go_names <- read_tsv("data/reference/humann_map/map_go_name.txt.gz",col_names = F) %>% 
+    dplyr::rename(go = "X1", go_name = "X2")
+  
+  go_map <- go_map_wide  %>% 
+    pivot_longer(-X1, names_to = "delete", values_to = "uniref") %>% 
+    dplyr::select(go = "X1", uniref) %>% 
+    filter(!is.na(uniref)) %>% 
+    left_join(go_names)
+  
+  write_rds(go_map, "data/reference/humann_map/go_map.rds",compress = "gz")
+} else{ 
+  go_names <- read_tsv("data/reference/humann_map/map_go_name.txt.gz",col_names = F) %>% 
+    dplyr::rename(go = "X1", go_name = "X2")
+  
+  go_map <- read_rds("data/reference/humann_map/go_map.rds")  
+}
+
+# Load UniRef abundance information
+
+
+if(!file.exists("results/functional/data/UniRef_abund.tsv")){
+  uniref_abund_files <- system("ls data/omics/metagenomes/*/humann_fastp/*_humann_genefamilies.tsv",intern = TRUE) %>%
+    data.frame(file = .) %>% 
+    mutate(sample = str_remove(file,"data/omics/metagenomes/.*/humann_fastp/") %>% str_remove("_humann_genefamilies.tsv")) 
+  
+  ur_abund <- read_tsv(uniref_abund_files$file[1],show_col_types = FALSE)
+  
+  for (file in uniref_abund_files$file[2:nrow(uniref_abund_files)]){
+    
+    new_file <- suppressMessages(read_tsv(file,show_col_types = FALSE))
+    
+    ur_abund <- ur_abund %>% full_join(new_file) %>%  rename_all(~str_remove(.x,"_humann_Abundance-RPKs"))
+  }
+  
+  write_tsv(ur_abund,"results/functional/data/UniRef_abund.tsv")
+} else {
+  ur_abund <- read_tsv("results/functional/data/UniRef_abund.tsv")
+}
+
+
+```
+
+### Wilcox test
+```{r}
+if(!file.exists("results/functional/data/uniref_abund.tsv")){
+  all_uniref <- ur_abund %>% 
+    rename(uniref = "# Gene Family") %>% 
+    filter(!str_detect(uniref,"\\|")) %>% 
+    mutate(across(-uniref,~replace_na(.x,0)),
+           across(-uniref,~.x/sum(.x))) %>% 
+    write_tsv("results/functional/data/uniref_abund.tsv")
+} else {
+  all_uniref <- read_tsv("results/functional/data/uniref_abund.tsv")
+}  
+
+annotated_all_uniref <- all_uniref %>% 
+  left_join(go_map) %>% 
+  dplyr::relocate(uniref,go,go_name)
+
+all_go <- annotated_all_uniref %>% 
+  filter(!is.na(go)) %>% 
+  write_tsv("results/functional/data/uniref_abund_w_GO_annotations.tsv")
+
+
+all_go_long <- all_go %>% 
+  pivot_longer(any_of(metadata$sample), names_to = "sample", values_to = "rel_abund") %>% 
+  left_join(metadata %>% dplyr::select(sample,transplant_type,gut_section))
+
+
+go_fc <- all_go_long %>%
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  group_by(go,transplant_type,sample) %>%
+  summarise(rel_abund = sum(rel_abund)) %>% 
+  ungroup %>% group_by(go,transplant_type) %>% 
+  summarise(rel_abund = mean(rel_abund)) %>% 
+  pivot_wider(id_cols = c(go),names_from = "transplant_type",values_from = "rel_abund",values_fill = 0) %>% 
+  ungroup() %>% group_by(go) %>% 
+  summarise(log2_fc = log2(Allogeneic/Syngeneic)) %>% 
+  left_join(go_names) 
+
+#Differential abundance of GO terms by wilcox test (nonparametric)
+non_para <- all_go_long %>%
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  group_by(go,transplant_type,sample) %>%
+  summarise(rel_abund = sum(rel_abund)) %>% 
+  pivot_wider(c(go,sample), names_from = transplant_type, values_from = rel_abund, values_fill = 0) %>% 
+  pivot_longer(c(Allogeneic,Syngeneic),names_to = "transplant_type", values_to = "rel_abund") %>% #pivot back and forth to re-introduce zeros
+  do(broom::tidy(wilcox.test(.$rel_abund ~ .$transplant_type,
+                 alternative = "two.sided",
+                 mu = 0,
+                 paired = FALSE,
+                 var.equal = FALSE,
+                 conf.level = 0.95
+                 )))
+
+non_para_w_names <- non_para %>% 
+  left_join(go_names) %>% 
+  left_join(go_fc) %>% 
+  mutate(p.BH = p.adjust(p.value, "BH" ))
+
+(all_go_long %>% 
+  mutate(transplant_type = if_else(!transplant_type %in% c("Allogeneic","Syngeneic"), "Naive", transplant_type)) %>% 
+  filter(go_name == "[BP] positive aerotaxis") %>% 
+  ggplot(aes(transplant_type, rel_abund, gut_section = gut_section,sample = sample)) +
+  geom_boxplot() +
+  geom_point() +
+  labs(title = "Positive aerotaxis") +
+  scale_y_log10()
+  ) %>% plotly::ggplotly()
+
+```
+
+
+
+### ALDEx2 differential abundance testing of GO terms
+
+#### Syn vs allo
+export data so this can run in the background
+```{r}
+aldex_metadata <- metadata %>% 
+  column_to_rownames("sample") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) 
+
+all_uniref <- ur_abund %>% 
+  rename(uniref = "# Gene Family") %>% 
+  filter(!str_detect(uniref,"\\|")) %>% 
+  mutate(across(-uniref,~replace_na(.x,0)),
+         across(-uniref,~.x/sum(.x)))
+
+annotated_all_uniref <- all_uniref %>% 
+  left_join(go_map) %>% 
+  dplyr::relocate(uniref,go,go_name) %>% 
+  mutate(go = if_else(is.na(go),"no_go",go),
+         go_name = if_else(is.na(go_name),"no go term",go),
+         go = if_else(uniref == "UNMAPPED", "UNMAPPED", go),
+         go_name = if_else(uniref == "UNMAPPED", "UNMAPPED", go_name)) %>% 
+  group_by(go) %>% 
+  summarise(across(any_of(rownames(aldex_metadata)), ~ sum(.x))) %>% 
+  column_to_rownames("go")
+
+min_abund <- min(annotated_all_uniref[annotated_all_uniref > 0])
+
+annotated_all_uniref <- annotated_all_uniref * 1 / min_abund
+
+annotated_all_uniref <- round(annotated_all_uniref)
+
+write_rds(annotated_all_uniref,"results/functional/data/annotated_all_uniref.rds")
+```
+
+Run ALDEx2
+```{r}
+library(tidyverse)
+library(ALDEx2)
+
+annotated_all_uniref <- read_rds("results/functional/data/annotated_all_uniref.rds")
+
+aldex_metadata <- metadata %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic"),
+         sample %in% colnames(annotated_all_uniref)) %>% 
+   mutate(transplant_type = relevel(factor(transplant_type), "Syngeneic")) %>% 
+  column_to_rownames("sample")
+
+aldex_uniref_table <- annotated_all_uniref[,rownames(aldex_metadata)]
+
+treatments <- aldex_metadata %>% pull("transplant_type")
+
+aldex_out_uniref <- aldex(aldex_uniref_table, treatments, mc.samples=1000, test="t", effect=TRUE, include.sample.summary=FALSE, verbose=FALSE, denom = "all")
+
+saveRDS(aldex_out_uniref,"results/functional/data/aldex_out_uniref.rds")
+
+
+aldex_out_uniref <- read_rds("results/functional/data/aldex_out_uniref.rds")
+
+aldex.plot(aldex_out_uniref, type="MW")
+
+aldex.plot(aldex_out_uniref, type="MA", test="welch", xlab="Log-ratio abundance",
+    ylab="Difference")
+aldex.plot(aldex_out_uniref, type="MW", test="welch", xlab="Dispersion",
+    ylab="Difference")
+
+
+aldex_out_w_names <- aldex_out_uniref %>% 
+  rownames_to_column("go") %>% 
+  left_join(go_names) %>% 
+  relocate(go_name) %>%
+  write_tsv("results/functional/data/go_differential_abundance_syn_vs_all_all_samples.tsv")
+
+
+aldex_out_w_names <- read_tsv("results/functional/data/go_differential_abundance_syn_vs_all_all_samples.tsv")
+```
+#### Iron GO term abundance
+```{r}
+iron_go <- aldex_out_w_names %>% 
+  filter(str_detect(go_name,"iron")) %>% 
+  select(go_name, rab.win.Syngeneic, rab.win.Allogeneic) %>% 
+  pivot_longer(-go_name, names_to = "treatment", values_to = "abund")
+
+iron_diff <- aldex_out_w_names %>% 
+  filter(str_detect(go_name,"iron")) %>% 
+  select(go_name, rab.win.Syngeneic, rab.win.Allogeneic) %>% 
+  mutate(diff = rab.win.Allogeneic - rab.win.Syngeneic)
+
+iron_diff %>% 
+  ggplot(aes(reorder(go_name,diff), diff)) +
+  geom_point() +
+  coord_flip() +
+  theme_bw() +
+  labs(y = "Abundance in Allo - Abundance in Syn", x = NULL, 
+       title = "Iron-related GO term abundance differences between Syn vs. Allo samples") +
+  theme(plot.caption = element_text(hjust = 0, face= "italic"), #Default is hjust=1
+        plot.title.position = "plot", #NEW parameter. Apply for subtitle too.
+        plot.caption.position =  "plot")
+ggsave("results/functional/figures/iron_go_diffs.png", width = 5, height = 3, dpi =300, scale = 2)
+
+iron_go %>% 
+  ggplot(aes(go_name, abund, color = treatment)) +
+  geom_point() +
+  coord_flip()
+
+```
+
+
+
+
+
+Get taxa associated with each GO term
+```{r}
+
+all_uniref_tax <- ur_abund %>% 
+  rename(uniref = "# Gene Family") %>% 
+  filter(str_detect(uniref,"\\|")) %>% 
+  mutate(across(-uniref,~replace_na(.x,0)),
+         across(-uniref,~.x/sum(.x)),
+         taxonomy = str_remove(uniref, ".*\\|"),
+         uniref = str_remove(uniref, "\\|.*")) %>% 
+  left_join(go_map) %>% 
+  left_join(go_names) %>% 
+  dplyr::relocate(uniref, taxonomy,go,go_name)
+
+
+all_go_tax <- all_uniref_tax %>% 
+  filter(!is.na(go))
+
+siderophore_taxa <- all_go_tax %>% 
+  pivot_longer(-c(go, go_name, uniref, taxonomy),names_to = "sample", values_to = "abund") %>% 
+  left_join(metadata %>% dplyr::select(sample, transplant_type, gut_section,plot_categories)) %>% 
+  filter(str_detect(go_name, "siderophore")) %>% 
+  group_by(go, go_name, taxonomy, plot_categories, gut_section) %>% 
+  summarise(abund = signif(sum(abund),2)) %>% 
+  pivot_wider(names_from = plot_categories, values_from = abund)
+
+str_wrap_factor <- function(x, ...) {
+  levels(x) <- str_wrap(levels(x), ...)
+  x
+}
+
+siderophore_taxa %>% 
+  pivot_longer(any_of(metadata$plot_categories), names_to = "cat", values_to = "abund") %>% 
+  mutate(genus = taxonomy %>% str_remove(";s__.*") %>% str_remove("^g__")) %>% 
+  group_by(genus, go, go_name, cat, gut_section) %>% 
+  summarize(abund = sum(abund)) %>% 
+  mutate(treatment = case_when(str_detect(cat, "Allogeneic") ~ "Allogeneic",
+                               str_detect(cat, "Syngeneic") ~ "Syngeneic",
+                               str_detect(cat, "Naive") ~ "Naive"),
+         days_after_transplant = case_when(str_detect(cat, "7") ~ 7,
+                               str_detect(cat, "21") ~ 21,
+                               str_detect(cat, "Naive") ~ 0),
+         gut_sec_wrap = str_wrap_factor(gut_section,width = 10)) %>% 
+  filter(str_detect(go_name, "iron") | str_detect(go_name,"siderophore uptake transmembrane transporter activity")) %>% 
+  ggplot(aes(factor(days_after_transplant), factor(treatment) %>% fct_relevel(c("Allogeneic", "Syngeneic","Naive")), size = abund * 100,color = gut_section)) +
+  geom_point() +
+  theme_bw() + 
+  #facet_grid(genus~str_wrap(go_name,width = 25)) + 
+  facet_nested(genus ~ str_wrap(go_name,width = 25) + gut_sec_wrap) +
+  labs(x = "Days after transplant", y = NULL, size = "% abundance", color = "Gut section") #+
+  #theme(axis.text.x = element_text(angle = -45, hjust = 0))
+
+ggsave("results/iron_taxa_w_gut_section.pdf", width = 4.5, height = 2.2, scale = 2)
+ggsave("results/iron_taxa_w_gut_section.png", width = 4.5, height = 2.2, scale = 2)
+
+siderophore_BP <- siderophore_taxa %>% 
+  filter(str_detect(go_name, "BP")) %>% 
+  ungroup() %>% 
+  dplyr::select(-go) %>% 
+  arrange(desc(Allogeneic)) %>% 
+  write_tsv("results/functional/siderophore_taxa.tsv")
+
+
+aerotaxis_taxa <- all_go_tax %>% 
+  pivot_longer(-c(go, go_name, uniref, taxonomy),names_to = "sample", values_to = "abund") %>% 
+  left_join(metadata %>% dplyr::select(sample, transplant_type, gut_section)) %>% 
+  filter(str_detect(go_name, "aerotaxis")) %>% 
+  group_by(go, go_name, taxonomy, transplant_type) %>% 
+  summarise(abund = signif(sum(abund),2)) %>% 
+  pivot_wider(names_from = transplant_type, values_from = abund)
+
+```
+
+
+
+
+
+#### Full aldex model
+```{r}
+
+aldex_abund <- rel.abund %>% 
+  dplyr::select(taxonomy_id, any_of(metadata$sample)) %>% 
+  pivot_longer(-taxonomy_id, names_to = "sample", values_to = "abund") %>% 
+  filter(abund > 0) %>% 
+  group_by(sample) %>% 
+  mutate(abund = round(abund / min(abund))) %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = sample, values_from = abund,values_fill = 0) %>% 
+  column_to_rownames("taxonomy_id")
+
+mm <- model.matrix(~ transplant_type + gut_section + days_after_transplant, aldex_metadata)
+
+clr <- aldex.clr(aldex_uniref_table,mm,mc.samples = 10, useMC = T)
+
+glm.test <- aldex.glm(clr, mm)
+
+glm_res_w_go_names <- glm.test %>% 
+  rownames_to_column("go") %>% 
+  left_join(go_names) %>% 
+  relocate(go_name)
+
+glm.effect <- aldex.glm.effect(clr)
+
+```
+
+
+
+### NMDS & PERMANOVA
+
+```{r}
+#Select only needed columns and perform Hellinger transformation
+simple_rel.abund <- annotated_all_uniref %>% 
+  dplyr::select(any_of(metadata$import_id)) %>% 
+  as.matrix() %>% 
+  microbiome::transform("hellinger")
+
+#Transpose matrix for Vegan
+t_abund <- t(simple_rel.abund)
+
+#Calculate Bray-Curtis distances
+bc_dist <- vegan::vegdist(t_abund,method = "bray") 
+```
+
+
+#### PERMANOVA testing of differences
+```{r}
+ordered_metadata <- metadata %>% filter(import_id %in% labels(bc_dist)) %>% column_to_rownames("import_id") 
+
+(permanova_bc <- vegan::adonis2(bc_dist ~ gut_section + days_after_transplant + transplant_type , ordered_metadata))
+```
+
+#### NMDS:
+
+```{r}
+
+#Calculate NMDS
+nmds <- vegan::metaMDS(bc_dist,k=2,trymax = 1000)
+
+#Extract NMDS values for plotting
+points <- nmds$points %>% as.data.frame %>% 
+  rownames_to_column("import_id")
+
+#Plot NMDS
+(uniref_all_function_nmds <- points %>% left_join(metadata) %>% 
+    ggplot(aes(MDS1,MDS2, 
+               color = transplant_type,
+               shape = gut_section)) +
+    labs(color = "ASR",
+         shape = "Sample source") +
+    annotate("text", label = glue::glue("Stress: {round(nmds$stress,3)}"), -.15, -.22) +  
+    scale_color_manual(values = c("#ef8a62", "#67a9cf")) +
+    geom_point(size = 2) +
+      theme_bw()
+  )
+
+ggsave("results/uniref_all_function_nmds.png",plot = uniref_all_function_nmds,width = 5, height = 4, dpi = 600, scale = 1.2)
+
+```
+
+
+
+## UniRef gene abundance
+
+### ALDEx2 differential abundance testing of UniRef90 clusters
+
+```{r}
+library(tidyverse)
+library(ALDEx2)
+
+metadata <- read_tsv("data/metadata.tsv") %>% 
+  column_to_rownames("sample") %>% 
+  filter(type == "concrete")
+
+uniref_abund <- read_rds("data/humann3/uniref_abund.rds")
+
+aldex_uniref_abund <- uniref_abund[,rownames(metadata)]
+
+treatments <- metadata %>% pull("asr_logical")
+
+aldex_out_uniref_decontam <- aldex(aldex_uniref_abund, treatments, test="t", include.sample.summary=FALSE, verbose=FALSE)
+
+saveRDS(aldex_out_uniref_decontam,"results/aldex/aldex_out_uniref_decontam.rds")
+
+
+
+aldex_out_uniref_decontam <- read_rds("results/aldex/aldex_out_uniref_decontam.rds")
+
+aldex.plot(aldex_out_uniref_decontam, type="MW")
+
+aldex.plot(aldex_out_uniref_decontam, type="MA", test="welch", xlab="Log-ratio abundance",
+    ylab="Difference")
+aldex.plot(aldex_out_uniref_decontam, type="MW", test="welch", xlab="Dispersion",
+    ylab="Difference")
+
+
+
+ASR_DA <- aldex_out_uniref_decontam %>% 
+  filter(effect > 0 & we.ep <= 0.05)
+
+
+noASR_DA <- aldex_out_uniref_decontam %>% 
+  filter(effect < 0 & we.ep <= 0.05)
+
+```
+
+
+# Enrichment--not currently implemented
+
+## GO enrichment of significant DA 
+
+```{r}
+
+#Full go term mapping from HUMANN3
+go_map_wide <- read_tsv("data/reference/humann_map2/map_go_uniref90.txt.gz",col_names = FALSE) 
+
+go_map <- go_map_wide  %>% 
+  pivot_longer(-X1, names_to = "delete", values_to = "uniref") %>% 
+  dplyr::select(go = "X1", uniref) %>% 
+  filter(!is.na(uniref))
+
+go_names <- read_tsv("data/reference/humann_map/map_go_name.txt.gz",col_names = F) %>% 
+  dplyr::rename(go = "X1", go_name = "X2")
+
+
+
+da_uniref_W_go <- 
+  left_join(go_map) %>% left_join(go_names)
+
+
+
+sample_go_count <- uniref_abund %>% 
+  group_by(go) %>% 
+  summarise(go_count = n()) %>% 
+  left_join(go_names) %>% 
+  filter(!is.na(go))
+
+go_background <- go_map %>%
+  group_by(go) %>% 
+  summarize(go_count = n()) %>% 
+  left_join(go_names)
+
+
+go_of_interest <- sample_go_count$go_count
+
+names(go_of_interest) <- sample_go_count$go_name
+
+
+```
+
+## GO Biological Process Enrichment
+
+```{r}
+#library(clusterProfiler)
+library(topGO)
+
+#Read in go term names
+go_names <- read_tsv("data/reference/humann_map/map_go_name.txt.gz",col_names = F) %>% 
+  dplyr::rename(go = "X1", go_name = "X2")
+
+#Full go term mapping from HUMANN3
+go_map_wide <- read_tsv("data/reference/humann_map2/map_go_uniref90.txt.gz",col_names = FALSE) 
+
+go_map2 <- go_map_wide %>% column_to_rownames("X1") %>% t()
+
+
+go_map <- go_map_wide  %>% 
+  pivot_longer(-X1, names_to = "delete", values_to = "uniref") %>% 
+  dplyr::select(go = "X1", uniref) %>% 
+  filter(!is.na(uniref))
+
+#List of uniref clusters in full mapping file
+uniref_in_uniref2go <- go_map %>% pull(uniref) %>% unique()
+
+rownames(go_map2) <- NULL
+
+my_list2 <- list()
+for(i in 1:ncol(go_map2)) { # Using for-loop to add columns to list
+  my_list2[[i]] <- go_map2[ , i]
+}
+
+names(my_list2) <- colnames(go_map2) 
+
+my_list2 <- lapply(my_list2, function(x) x[!is.na(x)])
+
+str(head(my_list2))
+
+geneID2GO <- inverseList(my_list2)
+
+names(uniref_in_uniref2go) <- uniref_in_uniref2go
+
+#names(uniref_in_sample) <- uniref_in_sample
+
+da_uniref <- rownames(ASR_DA)
+
+interesting_uniref <- factor(as.integer(uniref_in_uniref2go %in% da_uniref))
+
+names(interesting_uniref) <- uniref_in_uniref2go
+
+all_uniref_factor <- as.factor(uniref_in_uniref2go)
+
+
+# abund <- path_gfam %>% filter(is.na(tax), uniref != "UNMAPPED")
+# 
+# abund_list <- abund$`S3_Fallen_humann_Abundance-RPKs`
+# 
+# names(abund_list) <- abund$uniref
+
+
+topgo_data <- new("topGOdata",
+  description = "ALDEx2 DA abundant in ASR", ontology = "BP",
+  allGenes = interesting_uniref,
+  nodeSize = 2,
+  annot = annFUN.gene2GO, gene2GO = geneID2GO)
+
+
+##export topgo data so doens't have to be re-processed if interactively running enrichment tests again
+##qs package used because rds was either too slow or wasn't working properly
+
+qs::qsave(topgo_data,"data/humann3/topgoBP.qs",preset = "fast",nthreads = 2)
+
+```
+
+Read in topgo data (for interactive testing)
+```{r}
+topgo_data <- qs::qread("data/humann3/topgoBP.qs",nthreads = 2)
+
+```
+
+Using topGO's default weight01 which down-weights the upper level enrichments (get lower level results)
+And fisher for testing
+```{r}
+resultWeight <- runTest(topgo_data, statistic = "fisher")
+
+weight_res <- as.data.frame(resultWeight@score) %>% 
+  rownames_to_column("go") %>% 
+  left_join(go_names)
+
+write_tsv(weight_res,"results/weight_goBP_results.tsv")
+
+```
+
+Using topGO's default weight01 which down-weights the upper level enrichments (get lower level results)
+And the KS test for significance testing
+```{r}
+resultWeightKS <- runTest(topgo_data, statistic = "ks")
+
+
+weight_res_KS <- as.data.frame(resultWeightKS@score) %>% 
+  rownames_to_column("go") %>% 
+  left_join(go_names)
+
+write_tsv(weight_res_KS,"results/weight_goBP_KS_results.tsv")
+
+```
+
+
+Plot top 25 enriched terms
+```{r}
+weight_res %>% 
+  mutate(go_name = str_remove(go_name, "\\[BP\\]")) %>% 
+  top_n(25,-`resultWeight@score`) %>% 
+  filter(`resultWeight@score` <= 0.01) %>% 
+  ggplot(aes(`resultWeight@score`, reorder(go_name,-`resultWeight@score`))) +
+  geom_point() +
+  theme_bw() +
+  scale_x_log10() +
+  coord_cartesian(xlim = c(1e-7,0.01)) +
+  labs(y = NULL,
+       x = "topGO weight01 score",
+       title = "GO Biological Process Enrichment") +
+  ggsave("results/figures/goBP_enrichment.tiff",width = 4, height = 2.5,scale = 1.75) +
+  ggsave("results/figures/goBP_enrichment.png",width = 4, height = 2.5,scale = 1.75)
+  
+
+
+
+res_simp <- go_res %>% 
+  mutate(score = format(`resultWeight@score`, scientific = F, digits = 3))
+
+```
+
+
+
+
+
+
+Standard classical Fisher tests
+```{r}
+test.stat <- new("classicCount", testStatistic = GOFisherTest, name = "Fisher test")
+
+resultFisher <- getSigGroups(topgo_data, test.stat)
+
+fisher_res <- as.data.frame(resultFisher@score) %>% 
+  rownames_to_column("go") %>% 
+  left_join(go_names)
+
+write_tsv(fisher_res,"results/fisher_goBP_results.tsv")
+```
+
+
+
+## GO Molecular Function Enrichment
+
+```{r}
+topgo_MF <- new("topGOdata",
+  description = "S3 Fallen Go Enrichment", ontology = "MF",
+  allGenes = interesting_uniref,
+  nodeSize = 2,
+  annot = annFUN.gene2GO, gene2GO = geneID2GO)
+
+
+##export topgo data so doens't have to be re-processed if interactively running enrichment tests again
+##qs package used because rds was either too slow or wasn't working properly
+
+qs::qsave(topgo_MF,"data/humann3/topgo_MF.qs",preset = "fast",nthreads = 2)
+
+```
+
+Read in topgo data (for interactive testing)
+```{r}
+if (!exists("topgo_MF")){
+topgo_MF <- qs::qread("data/humann3/topgo_MF.qs",nthreads = 2)
+}
+```
+
+
+```{r}
+#Using topGO's default weight01 which down-weights the upper level enrichments (get lower level results)
+
+resultWeight_MF <- runTest(topgo_MF, statistic = "fisher")
+
+weight_res_MF <- as.data.frame(resultWeight_MF@score) %>% 
+  rownames_to_column("go") %>% 
+  left_join(go_names)
+
+write_tsv(weight_res_MF,"results/weightMF_go_results.tsv")
+
+```
+
+
+Standard classical Fisher tests
+```{r}
+test.stat <- new("classicCount", testStatistic = GOFisherTest, name = "Fisher test")
+
+resultFisher_MF <- getSigGroups(topgo_MF, test.stat)
+
+fisher_resMF <- as.data.frame(resultFisher_MF@score) %>% 
+  rownames_to_column("go") %>% 
+  left_join(go_names)
+
+write_tsv(fisher_resMF,"results/fisher_goMF_results.tsv")
+```
+
+
+
+##GO Cellular Component Enrichment
+
+
+```{r}
+topgo_CC <- new("topGOdata",
+  description = "S3 Fallen Go Enrichment", ontology = "CC",
+  allGenes = interesting_uniref,
+  nodeSize = 2,
+  annot = annFUN.gene2GO, gene2GO = geneID2GO)
+
+
+##export topgo data so doens't have to be re-processed if interactively running enrichment tests again
+##qs package used because rds was either too slow or wasn't working properly
+
+qs::qsave(topgo_CC,"data/humann3/topgo_CC.qs",preset = "fast",nthreads = 2)
+
+```
+
+Read in topgo data (for interactive testing)
+```{r}
+
+if (!exists("topgo_CC")){
+topgo_CC <- qs::qread("data/humann3/topgo_CC.qs",nthreads = 2)
+}
+```
+
+
+```{r}
+#Using topGO's default weight01 which down-weights the upper level enrichments (get lower level results)
+
+resultWeight_CC <- runTest(topgo_CC, statistic = "fisher")
+
+weight_res_CC <- as.data.frame(resultWeight_CC@score) %>% 
+  rownames_to_column("go") %>% 
+  left_join(go_names)
+
+write_tsv(weight_res_CC,"results/weightCC_go_results.tsv")
+
+```
+
+
+Standard classical Fisher tests
+```{r}
+test.stat <- new("classicCount", testStatistic = GOFisherTest, name = "Fisher test")
+
+resultFisher_CC <- getSigGroups(topgo_CC, test.stat)
+
+fisher_resCC <- as.data.frame(resultFisher_CC@score) %>% 
+  rownames_to_column("go") %>% 
+  left_join(go_names)
+
+write_tsv(fisher_resCC,"results/fisher_goCC_results.tsv")
+```
+
+
+# Bin based analyses
+
+## FeGenie bin annotations
+
+Get the number of genes per bin for calculating feGenie stats
+```{r}
+prodigal_files <- system("ls data/omics/metagenomes/coassembly/bins/drep_ALL_SAMPLES/dereplicated_genomes/prodigal/*.faa", intern = TRUE)
+
+get_num_genes <- function(path){
+  bin <- path %>% str_remove(".*/") %>% str_remove(".faa")
+  
+  n_genes <- Biostrings::readAAStringSet(prodigal_files[1]) %>% 
+  length() %>% 
+  data_frame(genome = bin, 
+             n_genes = ., 
+             path = path)
+}
+
+n_genes <- map_df(prodigal_files, get_num_genes)
+write_rds(n_genes, "data/omics/metagenomes/coassembly/bins/drep_ALL_SAMPLES/dereplicated_genomes/prodigal/n_genes.rds")
+```
+
+
+```{r}
+n_genes <- read_rds("data/omics/metagenomes/coassembly/bins/drep_ALL_SAMPLES/dereplicated_genomes/prodigal/n_genes.rds")
+
+coverm_tidy <- read_tsv("data/omics/metagenomes/coassembly/bins/ALL_BINS_coverage.tsv") %>% 
+   pivot_longer(-Genome, names_to = "metric", values_to = "value") %>% 
+  separate(metric, into = c("reads", "metric"),sep = " ", extra = "merge") %>% 
+  mutate(
+    sample_reads = str_remove(reads, "_fwd.*"),
+    sample = sample_reads,
+    metric = case_when(
+      metric == "Relative Abundance (%)" ~ "percent_abund",
+      metric == "Covered Bases" ~ "covered_bases",
+      metric == "Mean" ~ "mean",
+      metric == "Variance" ~ "variance",
+      metric == "Length" ~ "length",
+      metric == "RPKM" ~ "rpkm",
+      metric == "Read Count" ~ "count")
+    ) %>% 
+  dplyr::rename(genome = "Genome")
+
+coverm_tidy_wide <- coverm_tidy %>% 
+  pivot_wider(names_from = "metric", values_from = "value") %>% 
+  mutate(percent_covered_bases = covered_bases / length)
+
+percent_abund <- coverm_tidy %>% 
+  filter(metric == "percent_abund") %>% 
+  left_join(n_genes)
+
+```
+
+
+
+```{r}
+fe_genie_res <- read_csv("data/omics/metagenomes/coassembly/bins/fegenie/FeGenie-heatmap-data.csv") %>% 
+  mutate(across(everything(), ~as.character(.x))) %>% 
+  dplyr::rename(pathway = "X") %>% 
+  pivot_longer(-pathway, names_to = "genome", values_to = "pathway_gene_count") %>% 
+  mutate(genome = str_remove(genome, ".faa")) %>% 
+  mutate(pathway_gene_count = as.numeric(pathway_gene_count)) %>% 
+  arrange(desc(pathway_gene_count))
+
+fe_genie_results <- fe_genie_res %>% 
+  left_join(percent_abund) %>% 
+  left_join(n_genes) %>% 
+  mutate(prop_of_genes = pathway_gene_count / n_genes) %>% 
+  type_convert()
+
+fe_genie_results_per_sample <- fe_genie_results %>% 
+  dplyr::rename(rel_abund = "value") %>% 
+  group_by(sample, rel_abund, pathway) %>% 
+  summarise(prop_of_genes = sum(prop_of_genes, na.rm = TRUE)) %>% 
+  mutate(path_abund = prop_of_genes * rel_abund) %>% 
+  left_join(metadata)
+
+fe_genie_results_per_sample %>% 
+  ggplot(aes(transplant_type, path_abund)) +
+  geom_boxplot() +
+  facet_grid(pathway~., scales = "free_y") +
+  scale_y_log10()
+  
+
+fegenie_abund <- fe_genie_res %>% 
+  left_join(percent_abund) %>% 
+  group_by(sample, pathway) %>% 
+  summarise(abund = sum(value * pathway_gene_count, na.rm = TRUE)) %>% 
+  mutate(sample = str_remove(sample, "_fwd.fastq.gz")) %>% 
+  left_join(metadata)
+
+(fegenie_abund %>% 
+  ggplot(aes(gut_section, abund, color = gut_section)) +
+  geom_boxplot() +
+  facet_wrap(~pathway,scales = "free_y") 
+  #scale_y_log10()
+) %>% plotly::ggplotly()
+
+```
+
+
+## Community composition by bin abundance
+```{r}
+#Get bin tax
+gtdb_paths <- system("ls data/omics/metagenomes/*/bins/GTDB/gtdbtk.bac120.summary.tsv",intern = TRUE)
+
+gtdb_paths_arc <- system("ls data/omics/metagenomes/*/bins/GTDB/gtdbtk.a*",intern = TRUE)
+
+n_col <- read_tsv(gtdb_paths[1]) %>% ncol()
+
+ranks <- c("Domain","Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+gtdb_bac <- map_df(gtdb_paths,read_tsv, col_types = paste0(rep("c",n_col),collapse = "")) %>% 
+  type_convert() %>% 
+  separate(classification, ranks, sep = ";[a-z]__",remove = FALSE) %>% 
+  mutate(Domain = str_remove(Domain, "d__")) %>% 
+  dplyr::rename(genome ="user_genome")
+
+
+coverm_tidy <- read_tsv("data/omics/metagenomes/coassembly/bins/ALL_BINS_coverage.tsv") %>% 
+   pivot_longer(-Genome, names_to = "metric", values_to = "value") %>% 
+  separate(metric, into = c("reads", "metric"),sep = " ", extra = "merge") %>% 
+  mutate(
+    sample_reads = str_remove(reads, "_fwd.*"),
+    sample = sample_reads,
+    metric = case_when(
+      metric == "Relative Abundance (%)" ~ "percent_abund",
+      metric == "Covered Bases" ~ "covered_bases",
+      metric == "Mean" ~ "mean",
+      metric == "Variance" ~ "variance",
+      metric == "Length" ~ "length",
+      metric == "RPKM" ~ "rpkm",
+      metric == "Read Count" ~ "count")
+    ) %>% 
+  dplyr::rename(genome = "Genome")
+
+coverm_tidy_wide <- coverm_tidy %>% 
+  pivot_wider(names_from = "metric", values_from = "value") %>% 
+  mutate(percent_covered_bases = covered_bases / length) %>% 
+  filter(percent_covered_bases > 0.1)
+
+preDecontam_percent_abund <- coverm_tidy_wide %>%
+  # filter(metric == "percent_abund") %>% 
+  # dplyr::rename(percent_abund = "value") %>% 
+  left_join(gtdb_bac) %>% 
+  mutate(Phylum = if_else(genome =="unmapped", "unmapped", Phylum),
+         Phylum = if_else(is.na(genome), "other", Phylum)) %>% 
+  left_join(metadata)
+
+```
+
+### Checking spiked in organisms
+```{r}
+
+all_possible_contam_bins <- preDecontam_percent_abund %>% 
+  dplyr::select(genome, Domain, Phylum, Class, Order, Family, Genus, Species) %>% 
+  distinct() %>% 
+  filter(Genus %in% c("Clostridium_P", "Staphylococcus", "Escherichia"))
+
+# All spiked in organisms
+preDecontam_percent_abund %>% 
+  filter(Genus %in% c("Clostridium_P", "Staphylococcus", "Escherichia")) %>% 
+  ungroup() %>% 
+  group_by(researcher_sample_id, transplant_type) %>% 
+  summarise(percent_abund = sum(percent_abund)) %>% 
+  ggplot(aes(researcher_sample_id, percent_abund)) +
+  #geom_tile() +
+  geom_point() +
+  #scale_fill_viridis_c(trans = "log") +
+  scale_y_log10(labels = scales::comma) +
+  facet_wrap(~transplant_type,scales = "free_x") +
+  theme_bw() +
+  labs(title = "Summed abundance all spike-in organisms")
+ggsave("results/spike_ins/spike_combined_abund.png",width = 4, height = 3, dpi = 300, scale = 1.5)
+ggsave("results/spike_ins/spike_combined_abund.pdf",width = 4, height = 3, dpi = 300, scale = 1.5)
+
+preDecontam_percent_abund %>% 
+  filter(Genus %in% c("Clostridium_P", "Staphylococcus", "Escherichia")) %>% 
+  group_by(Genus, researcher_sample_id, transplant_type, gut_section) %>% 
+  summarise(percent_abund = sum(percent_abund)) %>% 
+  ggplot(aes(researcher_sample_id, percent_abund, color = Genus, group = Genus)) +
+  #geom_tile() +
+  geom_line() +
+  #scale_fill_viridis_c(trans = "log") +
+  scale_y_log10(labels = scales::comma) +
+  facet_grid(transplant_type~gut_section,scales = "free_x") +
+  theme_bw()
+ggsave("results/spike_ins/species_abund.png",width = 4, height = 3, dpi = 300, scale = 1.5)
+ggsave("results/spike_ins/species_abund.pdf",width = 4, height = 3, dpi = 300, scale = 1.5)
+
+
+preDecontam_percent_abund %>% 
+  filter(Genus %in% c("Clostridium_P", "Staphylococcus", "Escherichia")) %>%  
+  group_by(Genus, researcher_sample_id, transplant_type) %>% 
+  summarise(percent_abund = sum(percent_abund)) %>% 
+  ggplot(aes(researcher_sample_id, percent_abund, color = Genus, group = Genus, fill = Genus)) +
+  geom_bar(stat = "identity",position = "fill") +
+  #scale_fill_viridis_c(trans = "log") +
+  #scale_y_log10(labels = scales::comma) +
+  facet_wrap(~transplant_type,scales = "free_x") +
+  theme_bw()
+ggsave("results/spike_ins/norm_abund_bars.png",width = 4, height = 3, dpi = 300, scale = 1.5)
+ggsave("results/spike_ins/norm_abund_bars.png",width = 4, height = 3, dpi = 300, scale = 1.5)
+
+preDecontam_percent_abund %>% 
+  filter(Genus %in% c("Clostridium_P", "Staphylococcus", "Escherichia")) %>% 
+  group_by(Genus, researcher_sample_id, transplant_type) %>% 
+  summarise(percent_abund = sum(percent_abund)) %>% 
+  pivot_wider(names_from = Genus, values_from = percent_abund) %>% 
+  pivot_longer(c("Escherichia", "Staphylococcus"), names_to = "Genus", values_to = "percent_abund") %>%  
+  mutate(ratio_to_Clostridium_perfringens = percent_abund / `Clostridium_P`) %>% 
+  ggplot(aes(researcher_sample_id, ratio_to_Clostridium_perfringens, color = Genus, group = Genus)) +
+  #geom_tile() +
+  geom_line() +
+  #scale_fill_viridis_c(trans = "log") +
+  scale_y_log10(labels = scales::comma) +
+  facet_wrap(~transplant_type,scales = "free_x") +
+  theme_bw()
+ggsave("results/spike_ins/ratio_to_C_perfringens.png",width = 4, height = 3, dpi = 300, scale = 1.5)
+ggsave("results/spike_ins/ratio_to_C_perfringens_abund.pdf",width = 4, height = 3, dpi = 300,scale = 1.5)
+
+
+```
+
+#### Get all MAGs from spiked in organisms
+```{r}
+
+spike_in_abund <- preDecontam_percent_abund %>% 
+  filter(Species %in% c("Escherichia coli", "Clostridium_P perfringens", "Staphylococcus aureus"))
+
+# C_perfringens has the lowest abundance of the spiked-in organisms, most reliable to use for correcting abundance of other organisms
+c_perfringens_abund <- spike_in_abund %>% 
+  filter(Species == "Clostridium_P perfringens") %>% 
+  group_by(sample, import_id, transplant_type, days_after_transplant, gut_section, plot_categories) %>% 
+  summarise(percent_abund = sum(percent_abund),
+            scaling_factor = 0.16 / percent_abund)
+
+
+genome_copies <- read_excel("data/sample_data/spike_in_concs.xlsx") %>% 
+  select(researcher_sample_id, c_perfringens_genome_copies) %>% 
+  left_join(metadata %>% dplyr::select(import_id, researcher_sample_id))
+
+c_perfringens_abund_w_genome_copies <- spike_in_abund %>% 
+  filter(Species == "Clostridium_P perfringens") %>% 
+  group_by(sample, import_id, transplant_type, days_after_transplant, gut_section, plot_categories) %>% 
+  summarise(percent_abund = sum(percent_abund),
+            scaling_factor = 0.16 / percent_abund) %>% 
+  left_join(genome_copies)
+
+
+genome_copy_abund <- coverm_tidy_wide %>%
+  filter(!genome %in% contam_bins$genome) %>% 
+  left_join(gtdb_bac) %>% 
+  left_join(c_perfringens_abund_w_genome_copies %>% 
+              select(sample, c_perfringens_percent_abund = percent_abund, c_perfringens_genome_copies)) %>% 
+  group_by(sample) %>% 
+  mutate(Phylum = if_else(genome =="unmapped", "unmapped", Phylum),
+         Phylum = if_else(is.na(genome), "other", Phylum),
+         percent_abund = (percent_abund / sum(percent_abund) * 100),
+         c_perf_ratio = percent_abund / c_perfringens_percent_abund,
+         genome_copies = c_perf_ratio * c_perfringens_genome_copies) %>% 
+  left_join(metadata) #%>% 
+  #write_rds("results/percent_abund.rds")
+
+genome_copy_abund %>% 
+  group_by(sample, plot_categories, gut_section, days_after_transplant, transplant_type, Phylum) %>% 
+  summarise(genome_copies = sum(genome_copies)) %>% 
+  ggplot(aes(days_after_transplant, genome_copies, color = Phylum)) +
+  geom_point() +
+  facet_grid(transplant_type~gut_section) +
+  theme_bw()
+
+
+genome_copy_abund %>% 
+  group_by(sample, plot_categories, gut_section, days_after_transplant, transplant_type) %>% 
+  summarise(genome_copies = sum(genome_copies)) %>% 
+  ggplot(aes(plot_categories, genome_copies, color = plot_categories)) +
+  geom_boxplot() +
+  facet_grid(gut_section~.,scales = "free_x") +
+  scale_color_manual(values = c("#9a5ebd","#9dbfe0","#2083e6", "#dec8a6","#f09f26")) +
+  labs(x = NULL, y= "Genome copies")+
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -15, hjust = 0))
+
+#ggsa
+
+
+my_comparisons <- list( c("Allogeneic; day 21", "Allogeneic; day 7"), 
+                        c("Syngeneic; day 21", "Syngeneic; day 7"),
+                        c("Syngeneic; day 7", "Allogeneic; day 7"),
+                        c("Syngeneic; day 21", "Allogeneic; day 21"))
+p + stat_compare_means(comparisons = my_comparisons)+ # Add pairwise comparisons p-value
+  stat_compare_means(label.y = 50)     
+
+(genome_copy_abund %>% 
+  group_by(sample, plot_categories, gut_section, days_after_transplant, transplant_type) %>% 
+  summarise(genome_copies = sum(genome_copies)) %>% 
+  ggboxplot(x = "plot_categories", y = "genome_copies",
+          color = "plot_categories", palette = "jco",
+          add = "jitter") +
+    scale_color_manual(values = c("#9a5ebd","#9dbfe0","#2083e6", "#dec8a6","#f09f26")) +
+  stat_compare_means(aes(group = plot_categories),method = "t.test",comparisons = my_comparisons,size = 2) + # label = "p.signif" 
+    #stat_compare_means(label.y = 5e08) +                   # Add global p-value
+    labs(x = NULL, y = "Genome copies", color = NULL) +
+    scale_x_discrete(guide = guide_axis(angle = -25)) +
+    expand
+    facet_grid(gut_section~.,scales = "free_x") +
+    theme(plot.margin = margin(.2,1,.2,.2, "cm"))
+)
+ggsave("results/genome_copies_w_stats.png",width = 3, height = 3, scale = 2.5)
+
+
+## How many E.coli bins after drep?
+
+e_coli_bins_dreped <- spike_in_abund %>% filter(Species %in% c("Escherichia coli")) %>% 
+  dplyr::select(genome) %>% 
+  distinct() %>% pull(genome)
+n_ecoli_after_drep <-  e_coli_bins_dreped %>% length()
+str_glue("There are {n_ecoli_after_drep} unique E. coli genomes after running drep.")
+
+(e_coli_abund_by_bin <- spike_in_abund %>% 
+   filter(Species %in% c("Escherichia coli")) %>% 
+  group_by(Species, genome, researcher_sample_id, transplant_type) %>% 
+  summarise(percent_abund = sum(percent_abund)) %>% 
+  ggplot(aes(researcher_sample_id, percent_abund, color = genome, group = genome, fill = genome)) +
+  geom_bar(stat = "identity",position = "fill") +
+  #scale_fill_viridis_c(trans = "log") +
+  #scale_y_log10(labels = scales::comma) +
+  facet_wrap(~transplant_type,scales = "free_x") +
+  theme_bw() +
+  labs(fill = "E.coli MAG",
+       color = "E.coli MAG")
+  )
+
+ggsave("results/spike_ins/Ecoli_MAGs_norm_abund_bars.png",width = 4, height = 3, dpi = 300, scale = 1.5)
+ggsave("results/spike_ins/Ecoli_MAGs_norm_abund_bars.png",width = 4, height = 3, dpi = 300, scale = 1.5)
+
+(e_coli_abund_by_bin <- spike_in_abund %>% 
+   filter(Species %in% c("Escherichia coli")) %>% 
+  group_by(Species, genome, researcher_sample_id, transplant_type) %>% 
+  summarise(percent_abund = sum(percent_abund)) %>% 
+  ggplot(aes(researcher_sample_id, percent_abund, color = genome, group = genome, fill = genome)) +
+  geom_bar(stat = "identity") +
+  #scale_fill_viridis_c(trans = "log") +
+  #scale_y_log10(labels = scales::comma) +
+  facet_wrap(~transplant_type,scales = "free_x") +
+  theme_bw() +
+  labs(fill = "E.coli MAG",
+       color = "E.coli MAG")
+  )
+
+ggsave("results/spike_ins/Ecoli_MAGs_abund_bars.png",width = 4, height = 3, dpi = 300, scale = 1.5)
+ggsave("results/spike_ins/Ecoli_MAGs_abund_bars.png",width = 4, height = 3, dpi = 300, scale = 1.5)
+
+```
+
+KO differences between spiked in E.coli and E.coli in allo samples
+```{r}
+
+e.coli_KO <- kofamscan_res %>% 
+  filter(bin %in% e_coli_bins_dreped)
+
+spiked_in_ko <- e.coli_KO %>% 
+  mutate(spiked_in = if_else(bin == "d9b87562f950a07171764693c2dfc34d_metadecoder_945", "spike_in_ecoli", "ecoli_samp_origin")) %>% 
+  group_by(spiked_in, ko, ko_definition) %>% 
+  summarise(KO_abund = sum(gene_count)) %>% 
+  mutate(ko_pres =if_else(KO_abund > 0, TRUE, FALSE)) %>% 
+  pivot_wider(names_from = spiked_in, values_from = ko_pres) #%>% 
+  #filter(ecoli_samp_origin == TRUE &  spike_in_ecoli == FALSE)
+
+
+```
+
+#### Write out final abund & look @ decontaminated data
+```{r}
+
+contam_bins <- all_possible_contam_bins %>% 
+  filter(!str_detect(genome, "d9b87562f950a07171764693c2dfc34d_metadecoder_945")) 
+
+percent_abund <- coverm_tidy_wide %>%
+  filter(!genome %in% contam_bins$genome) %>% 
+  # filter(metric == "percent_abund") %>% 
+  # dplyr::rename(percent_abund = "value") %>% 
+  left_join(gtdb_bac) %>% 
+  group_by(sample) %>% 
+  mutate(Phylum = if_else(genome =="unmapped", "unmapped", Phylum),
+         Phylum = if_else(is.na(genome), "other", Phylum),
+         percent_abund = (percent_abund / sum(percent_abund) * 100)) %>% 
+  left_join(metadata) %>% 
+  write_rds("results/percent_abund.rds")
+
+scaled_percent_abund <- coverm_tidy_wide %>%
+  filter(!genome %in% contam_bins$genome) %>% 
+  # filter(metric == "percent_abund") %>% 
+  # dplyr::rename(percent_abund = "value") %>% 
+  left_join(gtdb_bac) %>% 
+  group_by(sample) %>% 
+  mutate(Phylum = if_else(genome =="unmapped", "unmapped", Phylum),
+         Phylum = if_else(is.na(genome), "other", Phylum),
+         percent_abund = (percent_abund / sum(percent_abund) * 100)) %>% 
+  filter(Phylum != "unmapped") %>% 
+  left_join(c_perfringens_abund %>% select(sample, scaling_factor)) %>% 
+  mutate(percent_abund = percent_abund * scaling_factor) %>% 
+  left_join(metadata) %>% 
+  write_rds("results/scaled_percent_abund.rds")
+
+plot_order <- percent_abund %>% 
+  dplyr::select(sample, gut_section, transplant_type, days_after_transplant) %>% 
+  distinct() %>% 
+  mutate(days_after_transplant = if_else(days_after_transplant == "N/A", NA_character_, days_after_transplant)) %>% 
+  type.convert() %>% 
+  group_by(gut_section, transplant_type) %>% 
+  arrange(desc(days_after_transplant)) %>% 
+  mutate(plot_order = row_number() %>% as.character())
+  
+
+percent_abund %>% 
+  mutate(Phylum = if_else(is.na(Phylum), "Other", Phylum),
+         days_after_transplant = if_else(days_after_transplant == "N/A", NA_character_, days_after_transplant),
+         transplant_type = factor(transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic"), ordered = TRUE)) %>% 
+  type_convert() %>% 
+  left_join(plot_order) %>% 
+  mutate(gut_section = factor(gut_section, levels = c("Terminal ileum", "Cecum", "Transverse Colon", "Descending Colon"), ordered = TRUE)) %>% 
+  group_by(gut_section, sample, plot_order, transplant_type, days_after_transplant, Phylum) %>% 
+  summarise(percent_abund = sum(percent_abund)) %>% 
+  ggplot(aes(plot_order, percent_abund, fill = Phylum, label = days_after_transplant)) +
+  geom_bar(stat = "identity") +
+  facet_grid(gut_section ~ factor(transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic"), ordered = TRUE), scales = "free_x",space = "free_x") +
+  theme_bw() +
+  geom_text(aes(x = plot_order, y = -10, label = days_after_transplant), inherit.aes = FALSE) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  labs(x = "Days after transplant", y = "% abundance")
+
+ggsave("results/bin_Phyla_abund.png", width = 6, height =4, scale =1.5)
+
+
+percent_abund %>% 
+  mutate(Class = if_else(is.na(Class), "Other", Class),
+         days_after_transplant = if_else(days_after_transplant == "N/A", NA_character_, days_after_transplant),
+         transplant_type = factor(transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic"), ordered = TRUE)) %>% 
+  type_convert() %>% 
+  left_join(plot_order) %>% 
+  mutate(gut_section = factor(gut_section, levels = c("Terminal ileum", "Cecum", "Transverse Colon", "Descending Colon"), ordered = TRUE)) %>% 
+  group_by(gut_section, sample, plot_order, transplant_type, days_after_transplant, Class) %>% 
+  summarise(percent_abund = sum(percent_abund)) %>% 
+  ggplot(aes(plot_order, percent_abund, fill = factor(Class) %>% forcats::fct_relevel("Other", after = Inf), label = days_after_transplant)) +
+  geom_bar(stat = "identity") +
+  facet_grid(gut_section ~ factor(transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic"), ordered = TRUE), scales = "free_x",space = "free_x") +
+  theme_bw() +
+  geom_text(aes(x = plot_order, y = -10, label = days_after_transplant), inherit.aes = FALSE) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  labs(x = "Days after transplant", y = "% abundance", fill = "Class")
+
+ggsave("results/bin_Class_abund.png", width = 6, height =4, scale =1.5)
+
+(percent_abund %>% 
+  mutate(Order = if_else(is.na(Order), "Other", Order),
+         Order = if_else(Order == "NA", "Other", Order),
+         days_after_transplant = if_else(days_after_transplant == "N/A", NA_character_, days_after_transplant),
+         transplant_type = factor(transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic"), ordered = TRUE)) %>% 
+  type_convert() %>% 
+  left_join(plot_order) %>% 
+  mutate(gut_section = factor(gut_section, levels = c("Terminal ileum", "Cecum", "Transverse Colon", "Descending Colon"), ordered = TRUE)) %>% 
+  group_by(gut_section, sample, plot_order, transplant_type, days_after_transplant, Order) %>% 
+  summarise(percent_abund = sum(percent_abund)) %>% 
+  mutate(Order = if_else(Order < 5, "Other", Order)) %>% 
+  ggplot(aes(plot_order, percent_abund, fill = Order, label = days_after_transplant)) +
+  geom_bar(stat = "identity") +
+  facet_grid(gut_section ~ factor(transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic"), ordered = TRUE), scales = "free_x",space = "free_x") +
+  theme_bw() +
+  geom_text(aes(x = plot_order, y = -10, label = days_after_transplant), inherit.aes = FALSE) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  labs(x = "Days after transplant", y = "% abundance")
+) #%>% plotly::ggplotly()
+
+ggsave("results/bin_Order_abund.png", width = 6, height =4, scale =1.5)
+
+
+```
+
+
+
+
+
+## KEGG Ortholog annotations in bins
+### KOfamScan results
+```{r}
+ko_abund <- system("ls data/omics/metagenomes/coassembly/bins/kofamscan/*_kofam_results.txt", intern = TRUE)
+
+read_kofamscan <- function(path){
+  bin <- path %>% str_remove(".*kofamscan/") %>% str_remove("_kofam_results.txt")
+  
+  read_tsv(path,show_col_types = FALSE) %>% 
+  dplyr::rename(sig = "#") %>% 
+  janitor::clean_names() %>%
+  filter(sig == "*") %>%
+  mutate(sample = gene_name %>% str_remove("_.*")) %>%
+  select(ko, "ko_definition", sample) %>%
+  group_by(ko, ko_definition, sample) %>%
+  summarise(gene_count = n()) %>% 
+    mutate(bin = bin)
+}
+
+kofamscan_res <- map_df(ko_abund, read_kofamscan) %>% 
+  write_rds("results/bin_kofamscan.rds") #%>% 
+  #left_join(metadata)
+```
+
+### Calculate KO abundance across all bins
+```{r}
+kofamscan_res <- read_rds("results/bin_kofamscan.rds")
+
+ko_defs <- kofamscan_res %>% 
+  dplyr::select(ko, ko_definition) %>% 
+  distinct()
+
+for_ko_percent_abund <- coverm_tidy_wide %>% 
+  dplyr::select(genome, sample, percent_abund)
+
+ko_abund_mat <- kofamscan_res %>% 
+  group_by(bin, ko, ko_definition) %>% 
+  summarise(count = sum(gene_count)) %>% 
+  left_join(for_ko_percent_abund %>% dplyr::rename(bin = "genome")) %>% 
+  mutate(ko_present = if_else(count > 0, 1, 0),
+         ko_abund = ko_present * percent_abund) %>% 
+  group_by(sample, ko) %>% 
+  summarise(ko_abund = sum(ko_abund)) %>% 
+  write_rds("results/bin_ko_abund.rds") %>% 
+  write_tsv("results/bin_ko_abund.tsv")
+
+
+ko_abund_mat_per_bin <- kofamscan_res %>% 
+  group_by(bin, ko, ko_definition) %>% 
+  summarise(count = sum(gene_count)) %>% 
+  left_join(percent_abund %>% dplyr::rename(bin = "genome")) %>% 
+  mutate(ko_present = if_else(count > 0, 1, 0),
+         ko_abund = ko_present * percent_abund) %>% 
+  group_by(sample, ko, bin) %>% 
+  summarise(ko_abund = sum(ko_abund)) %>% 
+  left_join(gtdb_bac %>% dplyr::select(bin = "genome", classification, any_of(ranks)), by = "bin") %>% 
+  write_rds("results/bin_ko_abund_per_bin.rds")
+
+per_bin_ko_abund_wide <- kofamscan_res %>% 
+  select(bin, ko, gene_count) %>% 
+  distinct() %>% 
+  filter(!is.na(gene_count)) %>% 
+  pivot_wider(c("bin"),names_from = ko, values_from = gene_count,values_fill = 0) %>% 
+  column_to_rownames("bin")
+
+ko_abund_mat_per_bin <- read_rds("results/bin_ko_abund_per_bin.rds")
+
+```
+
+#### Summarize by sample
+```{r}
+
+ko_abund_mat <- read_rds("results/bin_ko_abund.rds")
+
+ko_abund_mat_counts <- ko_abund_mat %>% 
+  group_by(sample) %>% 
+  mutate(ko_abund_int = round(ko_abund / min(ko_abund))) %>% 
+  dplyr::select(sample, ko_abund_int, ko) %>% 
+  pivot_wider(names_from = sample, values_from = ko_abund_int, values_fill = 0) %>% 
+  column_to_rownames("ko")
+```
+
+
+
+### NMDS & PERMANOVA
+
+```{r}
+#Select only needed columns and perform Hellinger transformation
+simple_rel.abund <- ko_abund_mat_counts %>% 
+  dplyr::select(any_of(metadata$import_id)) %>% 
+  as.matrix() %>% 
+  microbiome::transform("hellinger")
+
+#Transpose matrix for Vegan
+t_abund <- t(simple_rel.abund)
+
+#Calculate Bray-Curtis distances
+dist <- vegan::vegdist(t_abund,method = "robust.aitchison") 
+```
+
+
+#### PERMANOVA testing of differences
+```{r}
+ordered_metadata <- metadata %>% filter(import_id %in% labels(bc_dist)) %>% column_to_rownames("import_id") 
+
+(permanova_bc <- vegan::adonis2(dist ~ gut_section + days_after_transplant * transplant_type , ordered_metadata))
+```
+
+#### NMDS:
+
+```{r}
+
+#Calculate NMDS
+NMDS <- vegan::metaMDS(dist,k=2,trymax = 1000)
+
+NMDS_points <- NMDS$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("import_id") %>% 
+  left_join(metadata)
+
+#tax_fit <- envfit(NMDS, vegan_abund, permutations = 100, na.rm = TRUE)
+
+colors = c("#9a5ebd","#2083e6","#2083e6", "#f09f26","#f09f26")
+colors = c("#9a5ebd","#9dbfe0","#2083e6", "#dec8a6","#f09f26")
+
+(NMDS_points %>% 
+  mutate(type_and_days = paste0(transplant_type, "_", days_after_transplant),
+         location_type_and_days = paste0(gut_section, "_", type_and_days)) %>% 
+  ggplot(aes(MDS1, MDS2, color = plot_categories, shape = gut_section)) +
+  scale_alpha_discrete(range = c(0.4,1)) +
+  geom_point(aes(group = plot_categories)) +
+  scale_color_manual(values = colors) +
+  new_scale_color() +
+  ggforce::geom_mark_ellipse(data = . %>% filter(days_after_transplant != "other"),aes(group = days_after_transplant, label = str_glue("day {days_after_transplant}")),label.fontsize = 8, color = "grey70") +
+  coord_fixed(xlim = c(-150, 100), ylim = c(-100, 60)) +
+  labs(color = NULL, shape = NULL) +
+  theme_bw() ) #%>% plotly::ggplotly()
+
+ggsave("results/KO_NMDS.pdf", width = 6, height = 3, dpi = 600, scale = 1.25)
+ggsave("results/KO_NMDS.png", width = 6, height = 3, dpi = 600, scale = 1.25)
+```
+
+
+
+
+
+### Abundance of select KOs
+Butyrate:
+baiA: K15869
+Bai A: K22605
+baiB: K15868
+baiCD: K15870
+baiE: K15872
+baiF: K15871
+baiH: K15873
+baiN: K07007
+E1.1.1.201: K23231
+hdhA: K00076
+Cbh: K01442 (bile salt hydrolase)
+E1.1.1.391: K22606
+E1.1.1.393: K22607 
+
+#### Butyrate
+```{r}
+
+butyrate_kos <- c("K15869", "K22605", "K15868", "K15870", "K15872", "K15872", "K15871", "K15873", "K07007", "K23231", "K00076", "K01442", "K22606", "K22607")
+
+ko_abund_mat %>% 
+  left_join(metadata) %>% 
+  filter(ko %in% butyrate_kos) %>% 
+  ggplot(aes(sample, ko, fill = ko_abund)) +
+  geom_tile() +
+  facet_grid(transplant_type ~ gut_section,scales = "free_x",space = "free_x") +
+  scale_fill_viridis_c(trans = "log")
+  
+ko_abund_mat %>% 
+  left_join(metadata) %>% 
+  filter(ko %in% butyrate_kos,
+         !is.na(gut_section)) %>% 
+  ggplot(aes(transplant_type, ko_abund)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  scale_x_discrete(guide = guide_axis(angle = -45)) + 
+  facet_grid(ko~gut_section, scales = "free_y") +
+  labs(x = NULL) +
+  theme_bw()
+```
+
+#### Phenyllactic acid
+```{r}
+phenyllactic_acid <- c("K23109", "K13574", "K00016")
+
+ko_abund_mat %>% 
+  left_join(metadata) %>% 
+  filter(ko %in% phenyllactic_acid) %>% 
+  ggplot(aes(sample, ko, fill = ko_abund)) +
+  geom_tile() +
+  facet_grid( ~plot_categories ,scales = "free_x",space = "free_x") +
+  scale_fill_viridis_c(trans = "log")
+  
+ko_abund_mat %>% 
+  left_join(metadata) %>% 
+  filter(ko == "K00016") %>% 
+  ggplot(aes(sample, ko, size = ko_abund, color = gut_section)) +
+  geom_point() +
+  facet_grid(ko ~ plot_categories ,scales = "free",space = "free_x", ) +
+  scale_fill_viridis_c(trans = "log") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank()) +
+  labs(x = NULL)
+
+
+
+ko_abund_mat %>% 
+  left_join(metadata) %>% 
+  filter(ko %in% phenyllactic_acid) %>% 
+  ggplot(aes(plot_categories, ko_abund, color = gut_section)) +
+  geom_boxplot() +
+  facet_grid(ko ~ plot_categories ,scales = "free",space = "free_x", ) +
+  scale_fill_viridis_c(trans = "log") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank()) +
+  labs(x = NULL, 
+       y = "% abundance",
+       color = "Gut section")
+ggsave("results/functional/figures/phenyllactic_acid_KO_abund.png", width = 4, height = 2, scale = 2)
+ggsave("results/functional/figures/phenyllactic_acid_KO_abund.pdf", width = 4, height = 2, scale = 2)
+
+ko_abund_mat %>% 
+  left_join(metadata) %>% 
+  filter(ko %in% phenyllactic_acid,
+         !is.na(gut_section)) %>% 
+  ggplot(aes(transplant_type, ko_abund)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  scale_x_discrete(guide = guide_axis(angle = -45)) + 
+  facet_grid(ko~gut_section, scales = "free_y") +
+  labs(x = NULL) +
+  theme_bw()
+
+
+phenyllactic_acid_abund_tax <- ko_abund_mat_per_bin %>% 
+  left_join(metadata) %>% 
+  filter(ko == "K13574",
+         !is.na(gut_section)) %>% 
+  group_by(sample, ko, gut_section, transplant_type, Domain, Phylum, Class, Order, Genus) %>% 
+  summarise(abund = sum(ko_abund)) %>%  #per sample & genus abund
+  group_by(ko, gut_section, transplant_type, Domain, Phylum, Class, Order, Genus) %>% 
+  summarise(abund = mean(abund)) # mean across samples in same treatment group
+
+
+phenyllactic_acid_abund_tax %>% 
+  mutate(Genus = if_else(is.na(Domain),"Unclassified", Genus)) %>% 
+  ggplot(aes(transplant_type, factor(gut_section, levels = c("Terminal ileum", "Cecum", "Transverse Colon", "Descending Colon"), ordered = TRUE), size = abund)) +
+    geom_point() +
+  facet_grid(~Genus) + 
+  theme_bw() +
+  scale_x_discrete(guide = guide_axis(angle = -45)) + 
+  labs(y = NULL, x = NULL, size = "Mean\n% abundance",
+       title = "K13574: hydroxycarboxylate dehydrogenase B (hcxB)")
+ggsave("results/functional/figures/phenyllactic_acid_K13574_abund_by_taxa.png", width = 4, height = 2, dpi = 600, scale = 1.5)
+
+
+```
+
+
+```{r}
+phenyllactic_acid_abund_tax <- ko_abund_mat_per_bin %>% 
+  left_join(metadata) %>% 
+  filter(ko == "K00016",
+         !is.na(gut_section)) %>% 
+  group_by(sample, ko, gut_section, transplant_type, days_after_transplant, plot_categories, Domain, Phylum, Class, Order) %>% 
+  summarise(abund = sum(ko_abund)) %>%  #per sample & genus abund
+  group_by(ko, gut_section, transplant_type, days_after_transplant, Domain, Phylum, Class, Order,plot_categories) %>% 
+  summarise(abund = mean(abund)) # mean across samples in same treatment group
+
+# Plot categories on x, section y, faceted by order
+phenyllactic_acid_abund_tax %>% 
+  mutate(Order = if_else(is.na(Domain),"Unclassified", Order)) %>% 
+  ggplot(aes(as.factor(transplant_type) %>% forcats::fct_relevel(c("Naive", "Allogeneic", "Syngeneic")), days_after_transplant %>% forcats::fct_rev(), size = abund, color= plot_categories)) +
+  geom_point() +
+  facet_grid(factor(gut_section, levels = c("Terminal ileum", "Cecum", "Transverse Colon", "Descending Colon"), ordered = TRUE) %>% forcats::fct_rev()~Order) + 
+  theme_bw() +
+  scale_x_discrete(guide = guide_axis(angle = -45)) + 
+  labs(y = NULL, x = NULL, size = "Mean\n% abundance",
+       title = "K00016")
+ggsave("results/functional/figures/phenyllactic_acid_K00016_abund_by_taxa.png", width = 10, height = 2, dpi = 600, scale = 2.5)
+
+
+phenyllactic_acid_abund_tax %>% 
+  mutate(Order = if_else(is.na(Domain),"Unclassified", Order)) %>% 
+  ggplot(aes(plot_categories, abund, color= plot_categories)) +
+  geom_point() +
+  facet_grid(factor(gut_section, levels = c("Terminal ileum", "Cecum", "Transverse Colon", "Descending Colon"), ordered = TRUE) %>% forcats::fct_rev()~Order) + 
+  theme_bw() +
+  scale_x_discrete(guide = guide_axis(angle = -45)) + 
+  labs(y = NULL, x = NULL, size = "Mean\n% abundance",
+       title = "K00016")
+ggsave("results/functional/figures/phenyllactic_acid_K00016_abund_by_taxa_updated.png", width = 6, height = 2, dpi = 600, scale = 4)
+
+
+phenyllactic_acid_abund_tax_by_sample <- ko_abund_mat_per_bin %>% 
+  left_join(metadata) %>% 
+  filter(ko == "K00016",
+         !is.na(gut_section)) %>% 
+  group_by(sample, ko, gut_section, transplant_type, days_after_transplant, plot_categories, Domain, Phylum, Class, Order) %>% 
+  summarise(abund = sum(ko_abund)) %>%  #per sample & genus abund
+  group_by(ko, gut_section, transplant_type, days_after_transplant, Domain, Phylum, Class, Order,plot_categories,sample) %>% 
+  summarise(abund = mean(abund)) # mean across samples in same treatment group
+
+phenyllactic_acid_abund_tax_by_sample %>% 
+  mutate(Order = if_else(is.na(Domain),"Unclassified", Order)) %>% 
+  filter(days_after_transplant == "21",
+         abund > 0.1) %>%  
+  ggplot(aes(gut_section, abund, color= plot_categories)) +
+    #geom_boxplot(outliers = FALSE,alpha = 0.9) + 
+    geom_point(position = position_jitterdodge(dodge.width = 0.5,jitter.width = 0.2)) +
+    #facet_grid(factor(, levels = c("Terminal ileum", "Cecum", "Transverse Colon", "Descending Colon"), ordered = TRUE) ~ Order) + 
+    facet_grid(~Order) +
+    scale_color_manual(values = c("#2083e6", "#f09f26")) +
+    theme_bw() +
+    scale_x_discrete(guide = guide_axis(angle = -45)) + 
+    labs(y = NULL, x = NULL, size = "Mean\n% abundance",
+         title = "K00016",
+         color = NULL)
+ggsave("results/functional/figures/phenyllactic_acid_K00016_abund_by_taxa_updated_DAY21.png", width = 3, height = 1, scale = 4)
+ggsave("results/functional/figures/phenyllactic_acid_K00016_abund_by_taxa_updated_DAY21.pdf", width = 3, height = 1, scale = 4)
+```
+
+
+
+
+#### SCFA
+L2HGDH: K00109
+Gcta: K01039
+Gctb: K01040
+Gcdh: K00252
+Gcda: K01615
+ACAT: K00626
+Hbd: K00074
+croR: K17865
+KamA: K01843
+KamD: K01844
+KamE: K18011
+Kdd: K18012
+Kce: K18013
+Kal: K18014
+Bcd: K00248
+AbfH: K18120
+Cat2: K18122
+abfD: K14534
+Ptb: K00634
+Buk: K00929
+Atod: K01034
+
+
+##### Butyrate
+```{r}
+
+SCFA_kos <- c("K00109", "K01039", "K01040", "K00252", "K01615", "K00626", "K00074", "K17865", "K01843", "K01844", "K18011", "K18012", "K18013", "K18014", "K00248", "K18120", "K18122", "K14534", "K00634", "K00634", "K00929", "K01034")
+
+ko_abund_mat %>% 
+  left_join(metadata) %>% 
+  filter(ko %in% SCFA_kos) %>% 
+  ggplot(aes(sample, ko, fill = ko_abund)) +
+  geom_tile() +
+  facet_grid(transplant_type ~ gut_section,scales = "free_x",space = "free_x") +
+  scale_fill_viridis_c(trans = "log")
+  
+ko_abund_mat %>% 
+  left_join(metadata) %>% 
+  filter(ko %in% SCFA_kos,
+         !is.na(gut_section)) %>% 
+  ggplot(aes(transplant_type, ko_abund)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  scale_x_discrete(guide = guide_axis(angle = -45)) + 
+  facet_grid(gut_section~ ko) + #scales = "free_y"
+  labs(x = NULL) +
+  theme_bw()
+ggsave("results/functional/figures/SCFA_koAbund_bins.png", width = 10, height = 6, scale = 1.5)
+
+```
+
+
+
+
+### Differential abundance of KOs in bins
+#### Syn vs. allo
+```{r}
+library(ALDEx2)
+
+ko_names <- ko_abund_mat_counts %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  dplyr::select(ko, ko_definition) %>% 
+  distinct()
+
+aldex_metadata <- metadata %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic"),
+         sample %in% colnames(ko_abund_mat_counts)) %>% 
+   mutate(transplant_type = relevel(factor(transplant_type), "Syngeneic")) %>% 
+  column_to_rownames("sample")
+
+aldex_ko_table <- ko_abund_mat_counts[,rownames(aldex_metadata)]
+
+treatments <- aldex_metadata %>% pull("transplant_type")
+
+aldex_out_ko <- aldex(aldex_ko_table, treatments, mc.samples=1000, test="t", effect=TRUE, include.sample.summary=FALSE, verbose=FALSE, denom = "all")
+
+saveRDS(aldex_out_ko,"results/functional/data/aldex_out_ko_bins.rds")
+
+
+aldex_out_ko <- read_rds("results/functional/data/aldex_out_ko_bins.rds")
+
+aldex.plot(aldex_out_ko, type="MW")
+
+aldex.plot(aldex_out_ko, type="MA", test="welch", xlab="Log-ratio abundance",
+    ylab="Difference")
+aldex.plot(aldex_out_ko, type="MW", test="welch", xlab="Dispersion",
+    ylab="Difference")
+
+aldex_out_w_names <- aldex_out_ko %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_names) %>% 
+  relocate(ko_definition) %>% 
+  write_tsv("results/functional/data/KO_fromBins_diffAbund_synVSallo_allSamples.tsv")
+
+aldex_out_w_names <- read_tsv("results/functional/data/go_differential_abundance_syn_vs_all_all_samples.tsv")
+```
+
+#### Full aldex model
+```{r}
+mm <- model.matrix(~ transplant_type + gut_section + days_after_transplant, aldex_metadata)
+
+clr <- aldex.clr(aldex_ko_table,mm,mc.samples = 100, useMC = T)
+
+glm.test <- aldex.glm(clr, mm)
+
+glm_res_w_ko_dfs <- glm.test %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  relocate(ko_definition) %>% 
+  write_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel.tsv")
+
+glm_res_w_ko_dfs <- read_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel.tsv")
+
+
+SCFA_full_model <- glm_res_w_ko_dfs %>% 
+  filter(ko %in% SCFA_kos)
+
+SCFA_full_model %>% 
+  ggplot(aes(1, ko, fill = `transplant_typeAllogeneic:Est`)) +
+  geom_tile()
+
+glm.effect <- aldex.glm.effect(clr)
+```
+
+#### Three-way interactions aldex model
+```{r}
+
+aldex_metadata <- metadata %>% 
+  column_to_rownames("import_id") %>% 
+  .[colnames(aldex_abund),] %>% 
+  filter(transplant_type %in% c("Syngeneic", "Allogeneic")) %>% 
+  mutate(transplant_type = relevel(factor(transplant_type), "Syngeneic"),
+         gut_section = factor(gut_section, ordered = FALSE) %>% relevel("Transverse Colon"), 
+         days_after_transplant = factor(days_after_transplant,ordered = FALSE) %>% relevel("7"))
+
+
+mm <- model.matrix(~ transplant_type * days_after_transplant * gut_section, aldex_metadata)
+
+clr <- aldex.clr(aldex_ko_table,mm,xmc.samples = 200, useMC = T)
+
+glm.test <- aldex.glm(clr, mm) %>% 
+  write_rds("results/functional/data/ko_three_way_interactions_glm.rds")
+
+glm_res_w_ko_dfs <- glm.test %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  relocate(ko_definition) %>% 
+  write_tsv("results/functional/data/KO_fromBins_diffAbund_three_way_interactions_glm.tsv")
+
+
+aldex_glm_test_full_int_w_koDef_long <- glm_res_w_ko_dfs %>% 
+  pivot_longer(-c(ko, ko_definition), names_to = "parameter", values_to = "value") %>% 
+  mutate(parameter_clean = str_remove(parameter, ":[pval.padj,t.val,SE,Est]*$"),
+         parameter_type = str_remove_all(parameter, ".*:"))
+
+cleaned_wide <- aldex_glm_test_full_int_w_koDef_long %>% 
+  select(ko, ko_definition, parameter_clean, parameter_type, value) %>% 
+  pivot_wider(names_from = "parameter_type", values_from ="value") %>% 
+  mutate(parameter_clean = case_when(parameter_clean == "Intercept:" ~ "intercept",
+                                     parameter_clean == "(Intercept)" ~ "intercept",
+                                     .default = parameter_clean), 
+         num_terms = str_count(parameter_clean, ":") + 1)
+
+
+make_enrichment_plot <- function(enriched_df, parameter) {
+  
+  plt <- enriched_df %>% 
+  arrange(desc(q.val)) %>% 
+  filter(p.val < 0.05) %>% 
+  ggplot(aes(stat.mean, reorder(str_wrap(pathway,40),-stat.mean),fill = enrichment,alpha = p.val)) +
+  geom_bar(stat = "identity") +
+  scale_alpha_continuous(range = c(1,.2)) +
+  theme_bw() +
+  #theme(axis.text.x = element_text(angle = -35, hjust = 0)) +
+  scale_fill_manual(values = c("blue", "orange2")) +
+  labs(fill = "type", y = "Pathway", x= "Enrichment", title = parameter) 
+  
+  ggsave(plot = plt, filename = str_glue("results/functional/figures/enriched_multi_interactions/{parameter}.pdf"))
+  
+  return(plt)
+}
+
+
+pathway_hierarchy <- read_tsv("~/references/kegg/2022/kegg.tsv") %>% 
+  dplyr::select(family, path_type, pathway) %>% 
+  distinct() %>% 
+  mutate(kegg_path_id = str_remove(pathway, ".*\\[PATH:") %>% str_remove("\\]"),
+         kegg_path_name = str_remove(pathway, "\\[PATH:.*")) %>% 
+  dplyr::select(-pathway)
+
+cleaned_wide_enrichment <- cleaned_wide %>% 
+  arrange(desc(Est)) %>% 
+  nest(-c(parameter_clean,num_terms)) %>% 
+  rowwise() %>% 
+  mutate(enrichment = list(gage(data$Est %>%  `names<-`(data$ko), gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")),
+         enriched = list(bind_rows(enrichment[["greater"]] %>% as.data.frame() %>% rownames_to_column("pathway") %>% mutate(enrichment = "Enriched"),
+                                      enrichment[["less"]] %>% as.data.frame() %>% rownames_to_column("pathway") %>%  mutate(enrichment = "Depleted"))),
+         plt = list(make_enrichment_plot(enriched, parameter_clean)))
+
+
+enrichment_unnested_two_int <- cleaned_wide_enrichment %>% 
+  filter(num_terms == 2,
+         str_detect(parameter_clean,)) %>% 
+  unglue::unglue_unnest(parameter_clean, "transplant_type{transplant_type}:days_after_transplant{days_after_transplant}:gut_section{gut_section}",remove = FALSE) %>% 
+  dplyr::select(-data, -enrichment, -plt) %>% 
+  unnest(enriched)
+
+enrichment_unnested_three_int <- cleaned_wide_enrichment %>% 
+  filter(num_terms == 3) %>% 
+  unglue::unglue_unnest(parameter_clean, "transplant_type{transplant_type}:days_after_transplant{days_after_transplant}:gut_section{gut_section}",remove = FALSE) %>% 
+  dplyr::select(-data, -enrichment, -plt) %>% 
+  unnest(enriched)
+
+filt_enriched_unnested <- enrichment_unnested_three_int %>% 
+  filter(p.val <= 0.05,
+         enrichment == "greater") 
+
+filt_enriched_unnested %>% 
+  mutate(plot_categories = str_glue("{transplant_type}; {days_after_transplant}")) %>% 
+  ggplot(aes(gut_section, pathway, fill, color = plot_categories)) +
+  geom_point()
+
+
+colors <- c(Allogeneic = "#E29E37",
+            Syngeneic = "#3279a8",
+            `Day 7` = "#a26dde",
+            `Day 21` = "#571a9c",
+            `Terminal ileum` = "#ccc46c",
+            `Cecum` = "#b89a7d",
+            `Transverse colon` = "#825f1f",
+            `Descending colon` = "#573f28")
+
+axis_order <- data.frame(parameter_clean = c("gut_sectionTerminal ileum",
+                                        "gut_sectionCecum",
+                                        "gut_sectionDescending Colon",
+                                        "transplant_typeAllogeneic",
+                                        "days_after_transplant21",
+                                        "transplant_typeAllogeneic:gut_sectionTerminal ileum",
+                                        "transplant_typeAllogeneic:gut_sectionCecum",
+                                        "transplant_typeAllogeneic:gut_sectionDescending Colon",
+                                        "days_after_transplant21:gut_sectionTerminal ileum",
+                                        "days_after_transplant21:gut_sectionCecum",
+                                        "days_after_transplant21:gut_sectionDescending Colon",
+                                        "transplant_typeAllogeneic:days_after_transplant21",
+                                        "transplant_typeAllogeneic:days_after_transplant21:gut_sectionTerminal ileum",
+                                        "transplant_typeAllogeneic:days_after_transplant21:gut_sectionCecum",
+                                        "transplant_typeAllogeneic:days_after_transplant21:gut_sectionDescending Colon"
+                                        )) %>% 
+  mutate(x_axis_order = row_number())
+
+
+
+effect_formatted_names <- cleaned_wide_enrichment %>% 
+  select(parameter_clean,num_terms) %>% 
+  mutate(effect_plot_name = case_when(parameter_clean == "intercept" ~ "Abundant organisms (intercept)",
+                                      parameter_clean == "transplant_typeAllogeneic" ~ "<b style='color:#E29E37'>Allogeneic</b>",
+                                      parameter_clean == "days_after_transplant21" ~ "<b style='color:#571a9c'>Day 21</b>",
+                                      parameter_clean == "gut_sectionTerminal ileum" ~ "<b style='color:#ccc46c'>Terminal ileum</b>",
+                                      parameter_clean == "gut_sectionCecum" ~ "<b style='color:#b89a7d'>Cecum</b>",
+                                      parameter_clean == "gut_sectionDescending Colon" ~ "<b style='color:#573f28'>Descending colon</b>",
+                                      parameter_clean == "transplant_typeAllogeneic:days_after_transplant21" ~ "<b style='color:#E29E37'>Allogeneic</b> <b style='color:#571a9c'>Day 21</b>",
+                                      parameter_clean == "transplant_typeAllogeneic:gut_sectionTerminal ileum" ~ "<b style='color:#ccc46c'>Terminal ileum</b> <b style='color:#E29E37'>Allogeneic</b>",
+                                      parameter_clean == "transplant_typeAllogeneic:gut_sectionCecum" ~ "<b style='color:#b89a7d'>Cecum</b> <b style='color:#E29E37'>Allogeneic</b>",
+                                      parameter_clean == "transplant_typeAllogeneic:gut_sectionDescending Colon" ~ "<b style='color:#573f28'>Descending colon</b> <b style='color:#E29E37'>Allogeneic</b>",
+                                      parameter_clean == "days_after_transplant21:gut_sectionTerminal ileum" ~ "<b style='color:#ccc46c'>Terminal ileum</b> <b style='color:#571a9c'>Day 21</b>",
+                                      parameter_clean == "days_after_transplant21:gut_sectionCecum" ~ "<b style='color:#b89a7d'>Cecum</b> <b style='color:#571a9c'>Day 21</b>",
+                                      parameter_clean == "days_after_transplant21:gut_sectionDescending Colon" ~ "<b style='color:#573f28'>Descending colon</b> <b style='color:#571a9c'>Day 21</b>",
+                                      parameter_clean == "transplant_typeAllogeneic:days_after_transplant21:gut_sectionTerminal ileum" ~ "<b style='color:#ccc46c'>Terminal ileum</b> <b style='color:#E29E37'>Allogeneic</b> <b style='color:#571a9c'>Day 21</b>",
+                                      parameter_clean == "transplant_typeAllogeneic:days_after_transplant21:gut_sectionCecum" ~ "<b style='color:#b89a7d'>Cecum</b> <b style='color:#E29E37'>Allogeneic</b> <b style='color:#571a9c'>Day 21</b>",
+                                      parameter_clean == "transplant_typeAllogeneic:days_after_transplant21:gut_sectionDescending Colon" ~ "<b style='color:#573f28'>Descending colon</b> <b style='color:#E29E37'>Allogeneic</b> <b style='color:#571a9c'>Day 21</b>",
+                                      ),
+         interacting_terms = case_when(num_terms == 1 ~ "Single variable",
+                                       num_terms == 2 ~ "Interaction of\ntwo variables",
+                                       num_terms == 3 ~ "Interaction of\nthree variables"),
+         interacting_terms = fct_reorder(interacting_terms, num_terms))
+
+
+cleaned_wide_enrichment %>% 
+  dplyr::select(-data, -enrichment, -plt) %>% 
+  unnest(enriched) %>% 
+  filter(p.val <= 0.05,
+         #enrichment == "Enriched"
+         ) %>% 
+  unglue::unglue_unnest(pathway, "{kegg_path_id} {kegg_path_name}") %>%
+  left_join(pathway_hierarchy %>% dplyr::select(-kegg_path_name)) %>%
+  group_by(parameter_clean) %>% 
+  mutate(num_enriched_paths = n()) %>% 
+  group_by(kegg_path_name) %>% 
+  mutate(num_terms_w_sig = n()) %>% 
+  mutate(path_type = if_else(is.na(path_type), "Other", path_type),
+         color_hex = case_when(enrichment == "Enriched" ~ "#004D40",
+                               enrichment == "Depleted" ~ "#FB7070")) %>% 
+  left_join(effect_formatted_names) %>% 
+  left_join(axis_order) %>% 
+  filter(parameter_clean != "intercept") %>% 
+  ggplot(aes(reorder(effect_plot_name, x_axis_order),reorder(kegg_path_name,num_terms_w_sig), size = stat.mean, color = color_hex, ordered = TRUE)) +
+  geom_point(alpha = .7) +
+  scale_x_discrete(guide = guide_axis(angle = -15)) +
+  scale_color_identity(guide = 'legend',
+                      labels = c("Enriched", "Depleted"),
+                      breaks =  c("#004D40","#FB7070"))+
+  #facet_grid(num_terms~path_type,scales = "free",space = "free") +
+  facet_grid(path_type~fct_rev(interacting_terms),scales = "free",space = "free") +
+  theme_bw() +
+  theme(strip.text.y.right = element_text(angle = 0),
+        axis.text.x = element_markdown(),
+        legend.position = "top")+
+  labs(y = "KEGG Pathway", x = NULL, size = "Enrichment", color = NULL)
+
+ggsave("results/kegg_enrichment/all_interactions.pdf",width = 4, height = 3.5, scale = 3.75)
+ggsave("results/kegg_enrichment/all_interactions.png", width = 4, height = 3.5, scale = 3.75)
+
+
+
+sig_2_way_int <- cleaned_wide %>% 
+  filter(num_terms == 2,
+         pval < 0.05) %>% 
+  unglue::unglue_unnest(parameter_clean, "transplant_type{transplant_type}:days_after_transplant{days_after_transplant}:gut_section{gut_section}")
+
+sig_3_way_int <- cleaned_wide %>% 
+  filter(num_terms == 3,
+         pval < 0.05) %>% 
+  unglue::unglue_unnest(parameter_clean, "transplant_type{transplant_type}:days_after_transplant{days_after_transplant}:gut_section{gut_section}")
+
+
+allo_21_section_effect <- cleaned_wide %>% 
+  filter(str_detect(parameter_clean, "transplant_typeAllogeneic:days_after_transplant21:gut_sectio")) %>% 
+  arrange(pval) %>% 
+  mutate(gut_section = str_remove(parameter_clean,"transplant_typeAllogeneic:days_after_transplant21:gut_section"))
+
+
+
+
+#glm_res_w_ko_dfs <- read_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel.tsv")
+
+
+SCFA_full_model <- glm_res_w_ko_dfs %>% 
+  filter(ko %in% SCFA_kos)
+
+SCFA_full_model %>% 
+  ggplot(aes(1, ko, fill = `transplant_typeAllogeneic:Est`)) +
+  geom_tile()
+
+glm.effect <- aldex.glm.effect(clr)
+```
+
+
+What MAG driving enrichment of replication and repair in TI day 21 samples
+```{r}
+
+day21_TI_samples <- metadata %>% 
+  filter(days_after_transplant == 21,
+         gut_section == "Terminal ileum") %>% 
+  pull(sample)
+
+ti21_dna_repair_kos <- kofamscan_res %>% 
+  dplyr::filter(ko %in% kegg_def$kg.sets$`ko03430 Mismatch repair`, 
+                sample %in% day21_TI_samples) %>% 
+  left_join(gtdb_bac %>% dplyr::select(bin = "genome", classification)) %>% 
+  left_join(percent_abund)
+
+```
+
+
+
+
+##### Module enrichement
+```{r}
+module_enrichemnt <- cleaned_wide %>% 
+  arrange(desc(Est)) %>%
+  mutate(ko_vec = Est %>% `names<-`(ko)) %>% 
+  nest(-c(parameter_clean,num_terms)) %>% 
+  rowwise() %>% 
+  mutate(enrichment = list(clusterProfiler::gseMKEGG(data$ko_vec,organism = "ko")@result),
+         )
+  
+test <- clusterProfiler::gseMKEGG(module_enrichemnt[[3]][[1]]$ko_vec,organism = "ko")@result
+  
+```
+
+
+
+
+#### Full model day 7
+```{r}
+ko_names <- ko_abund_mat_counts %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  dplyr::select(ko, ko_definition) %>% 
+  distinct()
+
+aldex_metadata <- metadata %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic"),
+         days_after_transplant == "7",
+         sample %in% colnames(ko_abund_mat_counts)) %>% 
+   mutate(transplant_type = relevel(factor(transplant_type), "Syngeneic")) %>% 
+  column_to_rownames("sample")
+
+aldex_ko_table <- ko_abund_mat_counts[,rownames(aldex_metadata)]
+
+
+mm <- model.matrix(~ transplant_type + gut_section, aldex_metadata)
+
+clr <- aldex.clr(aldex_ko_table,mm,mc.samples = 128, useMC = T)
+
+glm.test_day7 <- aldex.glm(clr, mm) %>% 
+  write_rds("results/functional/data/KO_fromBins_diffAbund_fullModel_DAY7.rds")
+
+glm_res_w_ko_dfs_day7 <- glm.test_day7 %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  relocate(ko_definition) %>% 
+  write_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel_DAY7.tsv")
+
+#glm_res_w_ko_dfs <- read_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel_DAY7.tsv")
+
+```
+
+#### Full model day 21
+```{r}
+ko_names <- ko_abund_mat_counts %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  dplyr::select(ko, ko_definition) %>% 
+  distinct()
+
+aldex_metadata <- metadata %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic"),
+         days_after_transplant == "21",
+         sample %in% colnames(ko_abund_mat_counts)) %>% 
+   mutate(transplant_type = relevel(factor(transplant_type), "Syngeneic")) %>% 
+  column_to_rownames("sample")
+
+aldex_ko_table <- ko_abund_mat_counts[,rownames(aldex_metadata)]
+
+
+mm <- model.matrix(~ transplant_type + gut_section, aldex_metadata)
+
+clr <- aldex.clr(aldex_ko_table,mm,mc.samples = 128, useMC = T)
+
+glm.test_day21 <- aldex.glm(clr, mm) %>% 
+  write_rds("results/functional/data/KO_fromBins_diffAbund_fullModel_DAY21.rds")
+
+glm_res_w_ko_dfs_day21 <- glm.test_day21 %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  relocate(ko_definition) %>% 
+  write_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel_DAY21.tsv")
+
+#glm_res_w_ko_dfs <- read_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel_DAY7.tsv")
+```
+
+#### Full model syn samples only
+```{r}
+ko_names <- ko_abund_mat_counts %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  dplyr::select(ko, ko_definition) %>% 
+  distinct()
+
+aldex_metadata <- metadata %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic"),
+         days_after_transplant == "21",
+         sample %in% colnames(ko_abund_mat_counts)) %>% 
+   mutate(transplant_type = relevel(factor(transplant_type), "Syngeneic")) %>% 
+  column_to_rownames("sample")
+
+aldex_ko_table <- ko_abund_mat_counts[,rownames(aldex_metadata)]
+
+
+mm <- model.matrix(~ transplant_type + gut_section, aldex_metadata)
+
+clr <- aldex.clr(aldex_ko_table,mm,mc.samples = 128, useMC = T)
+
+glm.test_day21 <- aldex.glm(clr, mm) %>% 
+  write_rds("results/functional/data/KO_fromBins_diffAbund_fullModel_DAY21.rds")
+
+glm_res_w_ko_dfs_day21 <- glm.test_day21 %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  relocate(ko_definition) %>% 
+  write_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel_DAY21.tsv")
+
+#glm_res_w_ko_dfs <- read_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel_DAY7.tsv")
+```
+
+#### Full model allo samples only
+```{r}
+ko_names <- ko_abund_mat_counts %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  dplyr::select(ko, ko_definition) %>% 
+  distinct()
+
+aldex_metadata <- metadata %>% 
+  filter(transplant_type %in% c("Allogeneic"),
+         sample %in% colnames(ko_abund_mat_counts)) %>% 
+  column_to_rownames("sample")
+
+aldex_ko_table <- ko_abund_mat_counts[,rownames(aldex_metadata)]
+
+
+mm <- model.matrix(~ days_after_transplant + gut_section, aldex_metadata)
+
+clr <- aldex.clr(aldex_ko_table,mm,mc.samples = 128, useMC = T)
+
+glm.test_allo <- aldex.glm(clr, mm) %>% 
+  write_rds("results/functional/data/KO_fromBins_diffAbund_fullModel_ALLO_ONLY.rds")
+
+glm_res_w_ko_dfs_allo <- glm.test_allo %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  relocate(ko_definition) %>% 
+  write_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel_ALLO_ONLY.tsv")
+
+#glm_res_w_ko_dfs <- read_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel_DAY7.tsv")
+```
+
+
+#### Full model allo samples only
+```{r}
+ko_names <- ko_abund_mat_counts %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  dplyr::select(ko, ko_definition) %>% 
+  distinct()
+
+aldex_metadata <- metadata %>% 
+  filter(transplant_type %in% c("Syngeneic"),
+         sample %in% colnames(ko_abund_mat_counts)) %>% 
+  column_to_rownames("sample")
+
+aldex_ko_table <- ko_abund_mat_counts[,rownames(aldex_metadata)]
+
+
+mm <- model.matrix(~ days_after_transplant + gut_section, aldex_metadata)
+
+clr <- aldex.clr(aldex_ko_table,mm,mc.samples = 128, useMC = T)
+
+glm.test_syn <- aldex.glm(clr, mm) %>% 
+  write_rds("results/functional/data/KO_fromBins_diffAbund_fullModel_syn_ONLY.rds")
+
+glm_res_w_ko_dfs_syn <- glm.test_syn %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  relocate(ko_definition) %>% 
+  write_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel_syn_ONLY.tsv")
+
+#glm_res_w_ko_dfs <- read_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel_DAY7.tsv")
+```
+
+### KEGG pathway analysis
+
+#### Assembly level (KOfamScan on assemblies for completeness)
+
+##### Make minpath inputs from KOfamScan outputs
+```{r}
+library(future.apply)
+library(tidyverse)
+plan(multisession,workers = 4)
+
+assembly_kofams <- system("ls -rt data/omics/metagenomes/*/proteins/*_kofam_results.txt",intern = TRUE)
+
+#path <- bin_kofams[1]
+
+make_minpath_inputs_assemblies <- function(path){
+  assembly_name <- basename(path) %>% str_remove("_kofam_results.*")
+  
+  if (!dir.exists(str_glue("data/omics/metagenomes/{assembly_name}/minpath"))) {
+    dir.create(str_glue("data/omics/metagenomes/{assembly_name}/minpath"))
+  }
+  
+  cols <- c("sig", "gene", "KO", "thrshld", "score", "E-value", "KO_def")
+  kofam_res <- read_tsv(path,col_names = cols,show_col_types = FALSE) %>% 
+    filter(sig =="*") %>% 
+    select(gene, KO) %>% 
+    write_tsv(str_glue("data/omics/metagenomes/{assembly_name}/minpath/KOs.txt"),col_names = FALSE)
+  return(invisible(NULL))
+  }
+
+trash <- future_mapply(make_minpath_inputs_assemblies,assembly_kofams)
+
+```
+
+##### Gene abundance by read mapping
+```{r}
+library(future.apply)
+library(furrr)
+library(tidyverse)
+plan(multisession,workers = 4)
+
+rpkms <- system("ls data/omics/metagenomes/*/genes/*_READSvsGENES.rpkm", intern = TRUE)
+
+assembly_gene_abund <- future_map_dfr(rpkms,read_tsv,skip = 4)
+
+cleaned_assembly_gene_abund <- assembly_gene_abund %>% 
+  mutate(gene_name = str_remove_all(`#Name`, " #.*"))
+
+gene_KOs <- system("ls data/omics/metagenomes/*/minpath/KOs.txt", intern = TRUE) %>% map_df(read_tsv, show_col_types = FALSE, col_names = c("gene", "KO"))
+
+ko_abund_assembly <- cleaned_assembly_gene_abund %>% 
+  select(gene = "gene_name", RPKM) %>%  
+  left_join(gene_KOs) %>% 
+  mutate(assembly = str_remove_all(gene, "_.*")) %>% 
+  group_by(assembly,KO) %>% 
+  summarise(RPKM = sum(RPKM)) %>% 
+  write_rds("results/functional/ko_abund_assembly.rds")
+
+#ko_abund_assembly <- read_rds("results/functional/ko_abund_assembly.rds")
+
+```
+
+##### KEGG pathway abundance from assembly KOfamScan annotations
+```{r}
+assembly_minpath <- system("ls data/omics/metagenomes/*/minpath/*__report.txt", intern = TRUE) %>% 
+  data.frame(path = .) %>% 
+  filter(!str_detect(path, "_detailed.txt"))
+
+read_minpath_assembly <- function(path){
+  assembly <- basename(path) %>% str_remove("\\__report.txt")
+  
+  minpath_res <- read_tsv(path,col_names = FALSE)
+  
+  minpath_res <- unglue::unglue_data(minpath_res$X1, "path {path_num} kegg n/a  naive {present_naive}  minpath {present_minpath}  fam0 {path_fam0}  fam-found {path_fam-found}  name  {path_name}") %>% 
+    mutate(assembly = assembly)
+}
+
+test <- read_minpath_assembly(assembly_minpath$path[1])
+
+minpath_res_assemblies <- map_df(assembly_minpath$path, read_minpath_assembly)
+
+
+assembly_minpath_detailed <- system("ls data/omics/metagenomes/*/minpath/*__detailed.txt", intern = TRUE) %>% 
+  data.frame(path = .) %>% 
+  filter(str_detect(path, "_detailed.txt"))
+
+path <- assembly_minpath_detailed$path[1]
+
+read_minpath_detailed_assembly <- function(path){
+  assembly <- basename(path) %>% str_remove("__detailed.txt")
+    
+  minpath_res_detailed <- read_delim(path,delim = "  ",col_names = FALSE,show_col_types = FALSE) %>% 
+    mutate(pathway = if_else(str_detect(X1, "^path"), X1, NA_character_),
+           ko = if_else(str_detect(X1, "^   K"), str_trim(X1), NA_character_))
+    
+  minpath_res_detailed <- bind_cols(minpath_res_detailed, unglue::unglue_data(minpath_res_detailed$pathway, "path {path_num} fam0 {path_fam0} fam-found {path_fam-found} # {path_name}"))
+  
+  minpath_res_detailed <- bind_cols(minpath_res_detailed, unglue::unglue_data(minpath_res_detailed$ko, "{ko_id} hits {ko_hits} # {ko_name}"))
+  
+  minpath_res_detailed <- minpath_res_detailed %>% 
+    fill(starts_with("path")) %>% 
+    select(-X1, -pathway, -ko) %>% 
+    filter(!is.na(ko_id)) %>% 
+    mutate(assembly = assembly) %>% 
+    type_convert()
+  
+}
+
+test <- read_minpath_detailed_assembly(assembly_minpath_detailed$path[1])
+
+assembly_paths <- map_df(assembly_minpath_detailed$path, read_minpath_detailed_assembly) %>% 
+  write_rds("results/functional/assembly_minpath_detailed.rds")
+
+assembly_paths <- read_rds("results/functional/assembly_minpath_detailed.rds")
+
+
+assembly_path_w_abund <- assembly_paths %>% 
+  select(path_num, assembly, ko_id, ko_hits) %>% 
+  left_join(ko_abund_assembly %>% dplyr::rename(ko_id = "KO"))
+
+assembly_pathway_abund <- assembly_path_w_abund %>% 
+  group_by(assembly, path_num) %>% 
+  summarise(path_abund = min(RPKM)) %>% 
+  #mutate(path_fam0 = as.character(path_fam0)) %>% 
+  left_join(minpath_res_assemblies, by= c("path_num","assembly")) 
+
+# assembly_path_abund <- assembly_paths %>% 
+#   group_by(assembly, path_num, path_name) %>% 
+#   summarise(path_abund = median(ko_hits)) %>% 
+#   left_join(minpath_res_assemblies) %>% 
+#   type_convert() %>% 
+#   write_rds("results/functional/assembly_minpath.rds")
+
+minpath_abund_assembly <- assembly_pathway_abund %>% 
+  filter(present_minpath == 1,
+         !str_detect(path_num, "^05"), #filter out human specific
+         !str_detect(path_num, "^07"))
+
+assembly_path_abund_mat <- minpath_abund_assembly %>% 
+  mutate(path_abund = round(path_abund)) %>% 
+  select(assembly, path_num, path_abund) %>% 
+  pivot_wider(names_from = path_num, values_from = path_abund,values_fill = 0) %>% 
+  column_to_rownames("assembly") %>% t()
+
+
+
+path_names <- minpath_abund_assembly %>% 
+  ungroup() %>% 
+  select(path_name, path_num) %>% 
+  distinct()
+```
+
+
+```{r}
+assembly_path_abund_per_sample <- percent_abund %>% 
+  dplyr::rename(bin = "genome") %>% 
+  left_join(minpath_abund_assembly) %>% 
+  mutate(adj_path_abund = present_minpath * percent_abund) %>% 
+  group_by(sample, path_num, path_name) %>% 
+  summarise(path_abund = sum(adj_path_abund))
+  
+path_abund_mat <- path_abund_per_sample %>% 
+  select(sample, path_num, path_abund) %>% 
+  pivot_wider(names_from = "path_num", values_from = path_abund) %>% 
+  column_to_rownames("sample") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>% 
+  t()
+  
+# scale to counts with minimum of 1
+min_abund <- min(assembly_path_abund_mat[path_abund_mat > 0])
+assembly_path_abund_mat <- path_abund_mat * 1 / min_abund
+assembly_path_abund_mat <- round(assembly_path_abund_mat)
+```
+
+```{r}
+SynAllo_metadata <- metadata %>%
+  filter(sample %in% colnames(assembly_path_abund_mat)) %>% 
+  column_to_rownames("sample") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  mutate(transplant_type = factor(transplant_type,levels = c("Syngeneic","Allogeneic"),ordered = TRUE))
+
+aldex_path_abund <- assembly_path_abund_mat[,rownames(SynAllo_metadata)]
+
+treatments <- SynAllo_metadata %>% pull("transplant_type")
+
+#if(!file.exists(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv"))){
+
+  aldex_out_path <- ALDEx2::aldex(aldex_path_abund, treatments, mc.samples=1000, test="t", include.sample.summary=FALSE, verbose=FALSE, denom = "all",effect = TRUE)
+
+  aldex_out_path_w_names_median <- aldex_out_path %>% 
+    rownames_to_column("path_num") %>% 
+    left_join(path_names) %>% 
+    relocate(path_num, path_name)
+  
+  signif_aldex_out_path <- aldex_out_path %>% 
+    rownames_to_column("pathway") %>% 
+    write_tsv(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv")) %>% 
+    filter(we.ep <= 0.05)
+
+} else {
+  aldex_out_path <- read_tsv(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv"))
+  
+  signif_aldex_out_path <- aldex_out_path %>% 
+    filter(we.ep <= 0.05)
+}
+
+allo_paths <- signif_aldex_out_path %>% filter(effect > 1) %>% top_n(20,effect) %>% mutate(type = "Allogeneic",color = "blue")
+syn_paths <- signif_aldex_out_path %>% filter(effect < -1) %>% top_n(20,-effect) %>% mutate(type = "Syngeneic",color = "orange")
+
+plot_paths <- bind_rows(allo_paths,syn_paths)
+
+(SynAllo_pathways <- plot_paths %>% ggplot(aes(reorder(pathway,effect), effect, fill = color)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_identity(guide = "legend", labels = plot_paths$type %>% unique()) +
+  labs(x = NULL, fill = NULL) +
+  theme_bw()
+  #theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0)) 
+)
+  
+ggsave(paste0("results/functional/figures/SynAllo_pathways_",gut_sec,"_",days,".png"),SynAllo_pathways,width = 5, height = 3.5, dpi = 600, scale = 2)
+```
+
+#### By bins
+##### Make inputs for minpath
+```{r}
+bin_kofams <- system("ls data/omics/metagenomes/coassembly/bins/kofamscan/bins/*_kofam_results.txt",intern = TRUE)
+
+#path <- bin_kofams[1]
+
+make_minpath_inputs_bins <- function(path){
+  bin_name <- str_remove(path,".*bins/") %>% str_remove("_kofam_results.*")
+  
+  cols <- c("sig", "gene", "KO", "thrshld", "score", "E-value", "KO_def")
+  kofam_res <- read_tsv(path,col_names = cols,show_col_types = FALSE) %>% 
+    filter(sig =="*") %>% 
+    select(gene, KO) %>% 
+    write_tsv(str_glue("data/omics/metagenomes/coassembly/bins/minpath/input/{bin_name}.txt"),col_names = FALSE)
+  return(invisible(NULL))
+  }
+
+trash <- map(bin_kofams,make_minpath_inputs_bins)
+
+
+bin_name <- str_remove(bin_kofams[1],".*bins/") %>% str_remove("_kofam_results.*")
+  
+  cols <- c("sig", "gene", "KO", "thrshld", "score", "E-value", "KO_def")
+  kofam_res <- read_tsv(bin_kofams[1],col_names = cols,show_col_types = FALSE) %>% 
+    filter(sig =="*") %>% 
+    select(gene, KO)
+```
+
+##### Kegg pathways from bin annotations
+```{r}
+bin_minpath <- system("ls data/omics/metagenomes/coassembly/bins/minpath/output/*.txt", intern = TRUE) %>% 
+  data.frame(path = .) %>% 
+  filter(!str_detect(path, "_detailed.txt"))
+
+read_minpath <- function(path){
+  bin <- basename(path) %>% str_remove("\\.txt")
+  
+  minpath_res <- read_tsv(path,col_names = FALSE)
+  
+  minpath_res <- unglue::unglue_data(minpath_res$X1, "path {path_num} kegg n/a  naive {present_naive}  minpath {present_minpath}  fam0 {path_fam0}  fam-found {path_fam-found}  name  {path_name}") %>% 
+    mutate(bin = bin)
+}
+
+test <- read_minpath(bin_minpath$path[1])
+
+minpath_res <- map_df(bin_minpath$path, read_minpath)
+
+
+bin_minpath_detailed <- system("ls data/omics/metagenomes/coassembly/bins/minpath/output/*.txt", intern = TRUE) %>% 
+  data.frame(path = .) %>% 
+  filter(str_detect(path, "_detailed.txt"))
+
+
+read_minpath_detailed <- function(path){
+  bin <- basename(path) %>% str_remove("__detailed.txt")
+    
+  minpath_res_detailed <- read_delim(path,delim = "  ",col_names = FALSE,show_col_types = FALSE) %>% 
+    mutate(pathway = if_else(str_detect(X1, "^path"), X1, NA_character_),
+           ko = if_else(str_detect(X1, "^   K"), str_trim(X1), NA_character_))
+    
+  minpath_res_detailed <- bind_cols(minpath_res_detailed, unglue::unglue_data(minpath_res_detailed$pathway, "path {path_num} fam0 {path_fam0} fam-found {path_fam-found} # {path_name}"))
+  
+  minpath_res_detailed <- bind_cols(minpath_res_detailed, unglue::unglue_data(minpath_res_detailed$ko, "{ko_id} hits {ko_hits} # {ko_name}"))
+  
+  minpath_res_detailed <- minpath_res_detailed %>% 
+    fill(starts_with("path")) %>% 
+    select(-X1, -pathway, -ko) %>% 
+    filter(!is.na(ko_id)) %>% 
+    mutate(bin = bin) %>% 
+    type_convert()
+  
+}
+
+test <- read_minpath_detailed(bin_minpath_detailed$path[1])
+
+bin_paths <- map_df(bin_minpath_detailed$path, read_minpath_detailed) %>% 
+  write_rds("results/functional/bin_minpath_detailed.rds")
+
+bin_paths <- read_rds("results/functional/bin_minpath_detailed.rds")
+
+
+bin_path_abund <- bin_paths %>% 
+  group_by(bin, path_num, path_name) %>% 
+  summarise(path_abund = min(ko_hits)) %>% 
+  left_join(minpath_res) %>% 
+  type_convert() %>% 
+  write_rds("results/functional/bin_minpath.rds")
+
+bin_path_abund <- read_rds("results/functional/bin_minpath.rds")
+
+minpath_abund <- bin_path_abund %>% 
+  filter(present_minpath == 1,
+         !str_detect(path_num, "^05"), #filter out human specific
+         !str_detect(path_num, "^07"))
+
+path_names <- minpath_abund %>% 
+  ungroup() %>% 
+  select(path_name, path_num) %>% 
+  distinct()
+```
+
+
+```{r}
+path_abund_per_sample <- percent_abund %>% 
+  dplyr::rename(bin = "genome") %>% 
+  left_join(minpath_abund) %>% 
+  mutate(adj_path_abund = present_minpath * percent_abund) %>% 
+  group_by(sample, path_num, path_name) %>% 
+  summarise(path_abund = sum(adj_path_abund))
+  
+path_abund_mat <- path_abund_per_sample %>% 
+  select(sample, path_num, path_abund) %>% 
+  pivot_wider(names_from = "path_num", values_from = path_abund) %>% 
+  column_to_rownames("sample") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>% 
+  t()
+  
+# scale to counts with minimum of 1
+min_abund <- min(path_abund_mat[path_abund_mat > 0])
+path_abund_mat <- path_abund_mat * 1 / min_abund
+path_abund_mat <- round(path_abund_mat)
+```
+
+```{r}
+SynAllo_metadata <- metadata %>%
+  filter(sample %in% colnames(path_abund_mat)) %>% 
+  column_to_rownames("sample") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  mutate(transplant_type = factor(transplant_type,levels = c("Syngeneic","Allogeneic"),ordered = TRUE))
+
+aldex_path_abund <- path_abund_mat[,rownames(SynAllo_metadata)]
+
+treatments <- SynAllo_metadata %>% pull("transplant_type")
+
+#if(!file.exists(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv"))){
+
+  aldex_out_path <- ALDEx2::aldex(aldex_path_abund, treatments, mc.samples=1000, test="t", include.sample.summary=FALSE, verbose=FALSE, denom = "all",effect = TRUE)
+
+  aldex_out_path_w_names <- aldex_out_path %>% 
+    rownames_to_column("path_num") %>% 
+    left_join(path_names) %>% 
+    relocate(path_num, path_name)
+  
+  signif_aldex_out_path <- aldex_out_path %>% 
+    rownames_to_column("pathway") %>% 
+    write_tsv(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv")) %>% 
+    filter(we.ep <= 0.05)
+
+} else {
+  aldex_out_path <- read_tsv(paste0("results/functional/data/differentially_abundant_pathways_syn_vs_allo_",gut_sec,"_",days,".tsv"))
+  
+  signif_aldex_out_path <- aldex_out_path %>% 
+    filter(we.ep <= 0.05)
+}
+
+allo_paths <- signif_aldex_out_path %>% filter(effect > 1) %>% top_n(20,effect) %>% mutate(type = "Allogeneic",color = "blue")
+syn_paths <- signif_aldex_out_path %>% filter(effect < -1) %>% top_n(20,-effect) %>% mutate(type = "Syngeneic",color = "orange")
+
+plot_paths <- bind_rows(allo_paths,syn_paths)
+
+(SynAllo_pathways <- plot_paths %>% ggplot(aes(reorder(pathway,effect), effect, fill = color)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_identity(guide = "legend", labels = plot_paths$type %>% unique()) +
+  labs(x = NULL, fill = NULL) +
+  theme_bw()
+  #theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0)) 
+)
+  
+ggsave(paste0("results/functional/figures/SynAllo_pathways_",gut_sec,"_",days,".png"),SynAllo_pathways,width = 5, height = 3.5, dpi = 600, scale = 2)
+```
+
+##### Pathway abundance plots
+```{r}
+path_abund_per_sample %>% 
+  left_join(metadata) %>% 
+  filter(str_detect(path_name, "[Ff]atty acid")) %>% 
+  ggplot(aes(plot_categories, path_abund, fill = )) +
+  geom_boxplot() +
+  facet_wrap(~path_name, scales = "free_y")
+  #geom_bar(stat = "identity", position = "dodge")
+```
+
+```{r}
+path_abund_per_sample %>% 
+  left_join(metadata) %>% 
+  filter(str_detect(path_name, "bile")) %>% 
+  ggplot(aes(transplant_type, path_abund)) +
+  geom_boxplot() +
+  facet_wrap(~path_name, scales = "free_y")
+  #geom_bar(stat = "identity", position = "dodge")
+```
+
+```{r}
+path_abund_per_sample %>% 
+  left_join(metadata) %>% 
+  filter(str_detect(path_name, "Ferroptosis")) %>% 
+  ggplot(aes(transplant_type, path_abund)) +
+  geom_boxplot() +
+  facet_wrap(~path_name, scales = "free_y")
+  #geom_bar(stat = "identity", position = "dodge")
+```
+
+#### GAGE analysis
+Get KEGG pathways:
+```{r}
+kegg_def <- kegg.gsets(species="ko")
+
+```
+
+##### Bin level
+
+###### Naive
+```{r}
+ko_abund_wide <- ko_abund_mat %>% 
+  pivot_wider(names_from = sample, values_from = ko_abund,values_fill = 0) %>% 
+  column_to_rownames("ko") %>% 
+  as.matrix() 
+
+naive <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                             filter(transplant_type == "Naive") %>% 
+                                             pull("sample"))) %>% as.numeric()
+
+other <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                              filter(transplant_type != "Naive") %>% 
+                                              pull("sample"))) %>% as.numeric()
+
+enriched_naive <- gage(ko_abund_wide, gsets = kegg_def$kg.sets, ref = other, samp = naive,species = "ko",compare = "unpaired")
+
+enriched_naive_df <- enriched_naive[["greater"]] %>% as.data.frame()
+```
+
+###### All syn/allo
+```{r}
+ko_abund_wide <- ko_abund_mat %>% 
+  pivot_wider(names_from = sample, values_from = ko_abund,values_fill = 0) %>% 
+  column_to_rownames("ko") %>% 
+  as.matrix() 
+
+syn <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                             filter(transplant_type == "Syngeneic") %>% 
+                                             pull("sample"))) %>% as.numeric()
+
+allo <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                              filter(transplant_type == "Allogeneic") %>% 
+                                              pull("sample"))) %>% as.numeric()
+
+enriched_allo <- gage(ko_abund_wide, gsets = kegg_def$kg.sets, ref = syn, samp = allo,species = "ko",compare = "unpaired")
+
+enriched_allo_df <- enriched_allo[["greater"]] %>% as.data.frame()
+```
+
+###### Day 7 syn/allo
+```{r}
+ko_abund_wide <- ko_abund_mat %>% 
+  pivot_wider(names_from = sample, values_from = ko_abund,values_fill = 0) %>% 
+  column_to_rownames("ko") %>% 
+  as.matrix() 
+
+syn <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                             filter(days_after_transplant == 7,
+                                                    transplant_type == "Syngeneic") %>% 
+                                             pull("sample"))) %>% as.numeric()
+
+allo <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                              filter(days_after_transplant == 7,
+                                                     transplant_type == "Allogeneic") %>% 
+                                              pull("sample"))) %>% as.numeric()
+
+enriched_day7_allo <- gage(ko_abund_wide, gsets = kegg_def$kg.sets, ref = syn, samp = allo,species = "ko",compare = "unpaired")
+
+enriched_day7_allo_df <- enriched_day7_allo[["greater"]] %>% as.data.frame()
+```
+
+###### Day 21 syn/allo
+```{r}
+ko_abund_wide <- ko_abund_mat %>% 
+  pivot_wider(names_from = sample, values_from = ko_abund,values_fill = 0) %>% 
+  column_to_rownames("ko") %>% 
+  as.matrix() 
+
+syn <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                             filter(days_after_transplant == 21,
+                                                    transplant_type == "Syngeneic") %>% 
+                                             pull("sample"))) %>% as.numeric()
+
+allo <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                              filter(days_after_transplant == 21,
+                                                     transplant_type == "Allogeneic") %>% 
+                                              pull("sample"))) %>% as.numeric()
+
+enriched_day21_allo <- gage(ko_abund_wide, gsets = kegg_def$kg.sets, ref = syn, samp = allo,species = "ko",compare = "unpaired")
+
+enriched_day21_allo_df <- enriched_day21_allo[["greater"]] %>% as.data.frame()
+```
+
+
+###### Terminal illeum
+```{r}
+ko_abund_wide <- ko_abund_mat %>% 
+  pivot_wider(names_from = sample, values_from = ko_abund,values_fill = 0) %>% 
+  column_to_rownames("ko") %>% 
+  as.matrix() 
+
+ti <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                             filter(gut_section == "Terminal ileum") %>% 
+                                             pull("sample"))) %>% as.numeric()
+
+other <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                              filter(gut_section != "Terminal ileum") %>% 
+                                              pull("sample"))) %>% as.numeric()
+
+enriched_ti <- gage(ko_abund_wide, gsets = kegg_def$kg.sets, ref = other, samp = ti,species = "ko",compare = "unpaired")
+
+enriched_ti_df <- enriched_ti[["greater"]] %>% as.data.frame()
+
+ti <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                             filter(gut_section == "Terminal ileum") %>% 
+                                             pull("sample"))) %>% as.numeric()
+
+other <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                              filter(gut_section != "Terminal ileum") %>% 
+                                              pull("sample"))) %>% as.numeric()
+
+enriched_ti <- gage(ko_abund_wide, gsets = kegg_def$kg.sets, ref = other, samp = ti,species = "ko",compare = "unpaired")
+
+enriched_ti_df <- enriched_ti[["greater"]] %>% as.data.frame()
+
+```
+
+###### Cecum
+```{r}
+ko_abund_wide <- ko_abund_mat %>% 
+  pivot_wider(names_from = sample, values_from = ko_abund,values_fill = 0) %>% 
+  column_to_rownames("ko") %>% 
+  as.matrix() 
+
+cecum <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                             filter(gut_section == "Cecum") %>% 
+                                             pull("sample"))) %>% as.numeric()
+
+other <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                              filter(gut_section != "Cecum") %>% 
+                                              pull("sample"))) %>% as.numeric()
+
+enriched_cecum <- gage(ko_abund_wide, gsets = kegg_def$kg.sets, ref = other, samp = cecum,species = "ko",compare = "unpaired")
+
+enriched_cecum_df <- enriched_cecum[["greater"]] %>% as.data.frame()
+```
+
+
+###### Transverse
+```{r}
+ko_abund_wide <- ko_abund_mat %>% 
+  pivot_wider(names_from = sample, values_from = ko_abund,values_fill = 0) %>% 
+  column_to_rownames("ko") %>% 
+  as.matrix() 
+
+transverse <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                             filter(gut_section == "Transverse Colon") %>% 
+                                             pull("sample"))) %>% as.numeric()
+
+other <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                              filter(gut_section != "Transverse Colon") %>% 
+                                              pull("sample"))) %>% as.numeric()
+
+enriched_transverse <- gage(ko_abund_wide, gsets = kegg_def$kg.sets, ref = other, samp = transverse,species = "ko",compare = "unpaired")
+
+enriched_transverse_df <- enriched_transverse[["greater"]] %>% as.data.frame()
+```
+
+###### Descending
+```{r}
+ko_abund_wide <- ko_abund_mat %>% 
+  pivot_wider(names_from = sample, values_from = ko_abund,values_fill = 0) %>% 
+  column_to_rownames("ko") %>% 
+  as.matrix() 
+
+Descending <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                             filter(gut_section == "Descending Colon") %>% 
+                                             pull("sample"))) %>% as.numeric()
+
+other <- which(colnames(ko_abund_wide) %in% (metadata %>% 
+                                              filter(gut_section != "Descending Colon") %>% 
+                                              pull("sample"))) %>% as.numeric()
+
+enriched_Descending <- gage(ko_abund_wide, gsets = kegg_def$kg.sets, ref = other, samp = Descending,species = "ko",compare = "unpaired")
+
+enriched_Descending_df <- enriched_Descending[["greater"]] %>% as.data.frame()
+```
+
+
+Enrichment of aldex significant results
+```{r}
+enriched2 <- gage(koabund_for_cp, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2_df <- enriched2[["greater"]] %>% as.data.frame() %>% view()
+
+mm_interp <- mm %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% left_join(metadata)
+
+koabund <- glm_res_w_ko_dfs %>% 
+  filter(`gut_section.L:pval.holm` < 0.05) %>% 
+  select(ko,`gut_section.L:Est`) %>% 
+    arrange(desc(`gut_section.L:Est`))
+
+koabund_for_cp <- koabund$`gut_section.L:Est` %>% `names<-`(koabund$ko)
+
+kegg_test <- clusterProfiler::gseKEGG(koabund_for_cp, organism = "ko")
+```
+
+
+
+##### Assembly level
+```{r}
+ko_abund_wide <- ko_abund_assembly %>% dplyr::rename(sample = "assembly", ko = "KO", ko_abund = "RPKM") %>% 
+  pivot_wider(names_from = sample, values_from = ko_abund,values_fill = 0) %>% 
+  filter(!is.na(ko)) %>% 
+  column_to_rownames("ko") %>% 
+  as.matrix() 
+
+syn <- which(colnames(ko_abund_wide) %in% (metadata %>% filter(transplant_type == "Syngeneic") %>% pull("sample"))) %>% as.numeric()
+allo <- which(colnames(ko_abund_wide) %in% (metadata %>% filter(transplant_type == "Allogeneic") %>% pull("sample"))) %>% as.numeric()
+
+enriched <- gage(ko_abund_wide, gsets = kegg_def$kg.sets, ref = syn, samp = allo,species = "ko",compare = "unpaired")
+
+enriched[["greater"]] %>% as.data.frame() %>% view()
+
+enriched2 <- gage(koabund_for_cp, gsets = kegg_def$kg.sets, ref = NULL, samp = NULL,species = "ko")
+
+enriched2[["greater"]] %>% as.data.frame() %>% view()
+```
+
+
+## DRAM functional annotations
+
+### Predicted products from each bin
+```{r}
+dram_distillate <- read_tsv("data/omics/metagenomes/coassembly/bins/DRAM/indiv_bin_annot_concat/genome_summaries/product.tsv")
+
+binary_products <- dram_distillate %>% select(genome,where(is.logical)) %>% 
+  pivot_longer(-genome, names_to = "product", values_to = "capable") %>% 
+  mutate(capable = as.numeric(capable)) %>% 
+  group_by(genome, product, capable) %>% 
+  slice_max(capable, n = 1, with_ties = FALSE)
+
+binary_abund <- percent_abund %>% 
+  left_join(binary_products) %>% 
+  mutate(product_abund = percent_abund * capable) %>%
+  group_by(sample, product) %>% 
+  summarise(product_abund = sum(product_abund))
+
+product_abund_mat <- binary_abund %>% 
+  pivot_wider(names_from = "sample", values_from = "product_abund") %>% 
+  filter(!is.na(product)) %>% 
+  column_to_rownames("product")
+
+
+SynAllo_metadata <- metadata %>%
+  filter(import_id %in% colnames(product_abund_mat)) %>% 
+  column_to_rownames("import_id") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  mutate(transplant_type = factor(transplant_type,levels = c("Syngeneic","Allogeneic"),ordered = TRUE))
+
+
+treatments <- SynAllo_metadata %>% pull("transplant_type")
+
+
+aldex_out_dram_products <- ALDEx2::aldex(aldex_prod_abund, treatments, mc.samples=10, test="t", include.sample.summary=FALSE, verbose=FALSE, denom = "all",effect = TRUE) %>% 
+  write_rds("results/aldex_out_dram_products.rds")
+
+aldex_out_dram_products <- read_rds("results/aldex_out_dram_products.rds")
+
+aldex_out_dram_products_w_names_median <- aldex_out_dram_products %>% 
+  rownames_to_column("product") 
+
+signif_aldex_out_path <- aldex_out_dram_products %>% 
+  rownames_to_column("product") %>% 
+  filter()
+
+allo_paths <- signif_aldex_out_path %>% 
+  #filter(effect > 1) %>% 
+  top_n(5,effect) %>% 
+  mutate(type = "Allogeneic",color = "orange")
+syn_paths <- signif_aldex_out_path %>% 
+  #filter(effect < -1) %>% 
+  top_n(5,-effect) %>% 
+  mutate(type = "Syngeneic",color = "blue")
+
+plot_paths <- bind_rows(allo_paths,syn_paths)
+
+(dram_products <- plot_paths %>% ggplot(aes(reorder(product,effect), effect, fill = color)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_identity(guide = "legend", labels = plot_paths$type, breaks = plot_paths$color) +
+  labs(x = NULL, fill = NULL) +
+  theme_bw()
+  #theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0)) 
+)
+  
+ggsave(paste0("results/functional/figures/SynAllo_pathways_",gut_sec,"_",days,".png"),SynAllo_pathways,width = 5, height = 3.5, dpi = 600, scale = 2)
+```
+
+
+DRAM products GLM aldex
+```{r}
+aldex_metadata <- metadata %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic"),
+         sample %in% colnames(product_abund_mat)) %>% 
+   mutate(transplant_type = relevel(factor(transplant_type), "Syngeneic")) %>% 
+  column_to_rownames("sample")
+
+aldex_dram_product_table <- product_abund_mat[,rownames(aldex_metadata)]
+
+aldex_dram_product_table <- (aldex_dram_product_table / min(aldex_dram_product_table[aldex_dram_product_table > 0])) %>% 
+  round( )
+
+mm <- model.matrix(~ transplant_type + gut_section + days_after_transplant, aldex_metadata)
+
+clr_dram_products <- aldex.clr(aldex_dram_product_table,mm,mc.samples = 128, useMC = T)
+
+glm.test <- aldex.glm(clr_dram_products, mm)
+
+dram_products_aldex_glm <- glm.test %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  relocate(ko_definition) %>% 
+  write_tsv("results/functional/data/dram_products_aldex_glm.tsv")
+
+dram_products_aldex_glm <- read_tsv("results/functional/data/dram_products_aldex_glm.tsv")
+```
+
+
+
+```{r}
+#long_products <- 
+  
+
+product_abund_mat_for_plot_unfilterd <- product_abund_mat %>% 
+  rownames_to_column("product") %>% 
+  separate_wider_delim(product,delim = ": ", names = c("class", "step")) %>% 
+  pivot_longer(-c(class, step), names_to = "sample", values_to = "abund") %>% 
+  mutate(abund  = abund + 0.000001) %>% 
+  left_join(metadata) #%>% 
+  #filter(abund > 0.1)
+
+steps_to_plot <- product_abund_mat_for_plot_unfilterd %>% 
+  group_by(step) %>% 
+  filter(max(abund) > 1) %>% 
+  select(step) %>% 
+  distinct()
+
+product_abund_mat_for_plot <- product_abund_mat_for_plot_unfilterd %>% 
+  filter(step %in% steps_to_plot$step)
+
+product_classes <- product_abund_mat_for_plot$class %>% unique()
+
+test_class <- "Sulfur metabolism"
+current_class <- "Sulfur metabolism"
+current_class <- "SCFA and alcohol conversions"
+current_class <- "CAZy"
+
+for (current_class in product_classes){
+  colors = c("#9a5ebd","#9dbfe0","#2083e6", "#dec8a6","#f09f26")
+  
+  str_glue("starting class: {current_class}")
+  
+  product_abund_mat_for_plot %>% 
+    filter(class == current_class) %>% 
+  ggplot(aes(step, abund, color = plot_categories)) +
+      scale_color_manual(values = colors) +
+    #geom_point() +
+      geom_boxplot(position = "dodge") +
+    facet_grid(gut_section ~ .) +
+      scale_x_discrete(guide = guide_axis(angle = -35)) + 
+      theme_bw() +
+      labs(x = NULL, 
+           color = NULL)
+  
+  ggsave(str_glue("results/functional/figures/DRAM_predicted_products__{current_class}.png"), width = 4, height = 3, scale = 2.2, dpi=300)
+    
+  product_abund_mat_for_plot %>%
+    filter(class == current_class) %>% 
+    ggplot(aes(step, abund, color = plot_categories)) +
+      scale_color_manual(values = colors) +
+    #geom_point() +
+      geom_boxplot(position = "dodge") +
+    facet_grid(gut_section ~ .) +
+      scale_x_discrete(guide = guide_axis(angle = -35)) + 
+      theme_bw() +
+      labs(x = NULL, 
+           color = NULL) +
+    scale_y_log10()
+  
+  ggsave(str_glue("results/functional/figures/DRAM_predicted_products_LOG__{current_class}.png"), width = 4, height = 3, scale = 2.2, dpi=300)
+  
+  
+  
+  product_abund_mat_for_plot %>%
+    filter(class == current_class) %>% 
+      ggboxplot(x = "plot_categories", y = "abund",
+          fill = "plot_categories", palette = "jco") +
+    scale_fill_manual(values = colors) +
+    ggpubr::stat_compare_means(comparisons = my_comparisons,method = "t.test",hide.ns = TRUE,label = "p.signif",na.rm = TRUE,vjust = 0.8) +
+    facet_grid(str_wrap_factor(gut_section,10) ~ str_wrap(step,10)) +
+      scale_x_discrete(guide = guide_axis(angle = -35)) + 
+      theme_bw() +
+      labs(x = NULL, 
+           color = NULL,
+           y = "% abundance",
+           fill = NULL) +
+    #scale_y_log10(labels = scales::comma) +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          strip.text.y = element_text(angle = 0))
+  
+  ggsave(str_glue("results/functional/figures/DRAM_predicted_products_w_stats__{current_class}.png"), width = 3.75, height = 1.5, scale = 2.5, dpi=300)
+  
+}
+  
+```
+
+#### Butyrate
+
+```{r}
+colors = c("#9a5ebd","#9dbfe0","#2083e6", "#dec8a6","#f09f26")
+  
+
+product_abund_mat_for_plot %>% 
+  filter(step %in% c("Butyrate, pt 1", "Butyrate, pt 2")) %>% 
+ggplot(aes(step, abund, color = plot_categories)) +
+    scale_color_manual(values = colors) +
+  #geom_point() +
+    geom_boxplot(position = "dodge") +
+  facet_grid(~gut_section ) +
+    scale_x_discrete(guide = guide_axis(angle = -35)) + 
+    theme_bw() +
+    labs(x = NULL, 
+         color = NULL,
+         y = "% abundance")
+
+ggsave(str_glue("results/functional/figures/DRAM_predicted_products_butyrate.png"), width = 3.5, height = 1.5, scale = 2.2, dpi=300)
+
+
+product_abund_mat_for_plot %>% 
+  filter(step %in% c("Butyrate, pt 1", "Butyrate, pt 2")) %>% 
+#ggplot(aes(step, abund, color = plot_categories)) +
+  ggboxplot(x = "plot_categories", y = "abund",
+          fill = "plot_categories", palette = "jco") +
+    scale_fill_manual(values = colors) +
+    ggpubr::stat_compare_means(comparisons = my_comparisons,method = "t.test",hide.ns = TRUE,label = "p.signif",na.rm = TRUE,vjust = 0.8) +
+    scale_color_manual(values = colors) +
+  #geom_point() +
+ #   geom_boxplot(position = "dodge") +
+  ggh4x::facet_nested(~ str_wrap_factor(gut_section, 10) + step) +
+    scale_x_discrete(guide = guide_axis(angle = -35)) + 
+    theme_bw() +
+    labs(x = NULL, 
+         color = NULL,
+         fill = NULL,
+         y = "% abundance") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+ggsave(str_glue("results/functional/figures/DRAM_predicted_products_butyrate_by_section_w_stats.png"), width = 3.5, height = 1, scale = 2.5, dpi=300)
+ggsave(str_glue("results/functional/figures/DRAM_predicted_products_butyrate_by_section_w_stats.pdf"), width = 3.5, height = 1, scale = 2.5, dpi=300)
+
+    
+(butyrate_step1 <- product_abund_mat_for_plot %>% 
+  filter(step %in% c("Butyrate, pt 1", "Butyrate, pt 2")) %>% 
+#ggplot(aes(step, abund, color = plot_categories)) +
+  ggboxplot(x = "plot_categories", y = "abund",
+          fill = "plot_categories", palette = "jco") +
+    scale_fill_manual(values = colors) +
+    ggpubr::stat_compare_means(comparisons = my_comparisons,method = "t.test",hide.ns = TRUE,label = "p.signif",na.rm = TRUE,vjust = 0.8) +
+  stat_compare_means(method = "anova") +     # Add global Anova p-value
+    scale_color_manual(values = colors) +
+  #geom_point() +
+ #   geom_boxplot(position = "dodge") +
+  #scale_y_log10() +
+    ggh4x::facet_nested(~ str_wrap_factor(gut_section, 10) + step) +
+    scale_x_discrete(guide = guide_axis(angle = -35)) + 
+    theme_bw() +
+    labs(x = NULL, 
+         color = NULL,
+         y = "% abundance")
+)
+    
+ggsave(str_glue("results/functional/figures/DRAM_predicted_products_butyrate_by_section_w_stats_and_ANOVA.pdf"), width = 3.5, height = 1, scale = 2.5, dpi=300)
+ggsave(str_glue("results/functional/figures/DRAM_predicted_products_butyrate_by_section_w_stats_and_ANOVA.png"), width = 3.5, height = 1, scale = 2.5, dpi=300)
+    
+    
+  
+product_abund_mat_for_plot %>%
+  filter(class == current_class) %>% 
+  ggplot(aes(step, abund, color = plot_categories)) +
+    scale_color_manual(values = colors) +
+  #geom_point() +
+    geom_boxplot(position = "dodge") +
+  facet_grid(gut_section ~ .) +
+    scale_x_discrete(guide = guide_axis(angle = -35)) + 
+    theme_bw() +
+    labs(x = NULL, 
+         color = NULL) +
+  scale_y_log10()
+
+ggsave(str_glue("results/functional/figures/DRAM_predicted_butyrate_log10.png"), width = 4, height = 3, scale = 2.2, dpi=300)
+
+
+# Using alternate pathways described in DRAM github issues (however, an E. coli bin has the first pathway which seems wrong...)
+
+but1 <- data.frame(ko = c("K01034", "K01035"), pathway = c("butyrate_1", "butyrate_1"))
+but2 <- data.frame(ko = c("K00634", "K00929"), pathway = c("butyrate_2", "butyrate_2"))
+
+butyrate_paths <- bind_rows(but1, but2)
+
+but_abund <- ko_abund_mat %>% 
+  filter(ko %in% butyrate_paths$ko) %>% 
+  left_join(butyrate_paths, by = "ko") %>% 
+  group_by(sample, pathway) %>% 
+  mutate(steps_present = n()) %>% 
+  filter(steps_present == 2) %>% 
+  summarise(path_abund = min(ko_abund)) %>% 
+  left_join(metadata)
+
+but_abund %>% 
+ggplot(aes(pathway, path_abund, color = plot_categories)) +
+    scale_color_manual(values = colors) +
+  #geom_point() +
+    geom_boxplot(position = "dodge") +
+  facet_grid(gut_section ~ .) +
+    scale_x_discrete(guide = guide_axis(angle = -35)) + 
+    theme_bw() +
+    labs(x = NULL, 
+         color = NULL)
+
+
+but_abund_per_bin <- ko_abund_mat_per_bin %>% 
+  filter(ko %in% butyrate_paths$ko) %>% 
+  left_join(butyrate_paths, by = "ko") %>% 
+  group_by(sample, pathway, bin) %>% 
+  mutate(steps_present = n()) %>% 
+  filter(steps_present == 2) %>% 
+  summarise(path_abund = min(ko_abund)) %>% 
+  left_join(metadata)
+```
+
+
+
+
+
+```{r}
+dram_distillate <- readxl::read_xlsx("data/omics/metagenomes/coassembly/bins/DRAM/indiv_bin_annot_concat/genome_summaries/metabolism_summary.xlsx")
+
+binary_products <- dram_distillate %>% select(genome,where(is.logical)) %>% 
+  pivot_longer(-genome, names_to = "product", values_to = "capable") #%>% 
+  mutate(capable = as.numeric(capable))
+
+binary_abund <- percent_abund %>% 
+  left_join(binary_products) %>% 
+  mutate(product_abund = percent_abund * capable) %>% 
+  group_by(sample, product) %>% 
+  summarise(product_abund = sum(product_abund))
+
+product_abund_mat <- binary_abund %>% 
+  pivot_wider(names_from = "sample", values_from = "product_abund") %>% 
+  filter(!is.na(product)) %>% 
+  column_to_rownames("product")
+
+
+SynAllo_metadata <- metadata %>%
+  filter(import_id %in% colnames(product_abund_mat)) %>% 
+  column_to_rownames("import_id") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  mutate(transplant_type = factor(transplant_type,levels = c("Syngeneic","Allogeneic"),ordered = TRUE))
+
+aldex_path_abund <- product_abund_mat[,rownames(SynAllo_metadata)] %>% round()
+
+treatments <- SynAllo_metadata %>% pull("transplant_type")
+
+
+aldex_out_path <- ALDEx2::aldex(aldex_path_abund, treatments, mc.samples=1000, test="t", include.sample.summary=FALSE, verbose=FALSE, denom = "all",effect = TRUE)
+
+aldex_out_path_w_names_median <- aldex_out_path %>% 
+  rownames_to_column("path_num") %>% 
+  left_join(path_names) %>% 
+  relocate(path_num, path_name)
+
+signif_aldex_out_path <- aldex_out_path %>% 
+  rownames_to_column("pathway") %>% 
+  filter()
+
+allo_paths <- signif_aldex_out_path %>% filter(effect > 1) %>% top_n(20,effect) %>% mutate(type = "Allogeneic",color = "blue")
+syn_paths <- signif_aldex_out_path %>% filter(effect < -1) %>% top_n(20,-effect) %>% mutate(type = "Syngeneic",color = "orange")
+
+plot_paths <- bind_rows(allo_paths,syn_paths)
+```
+## EC reaction abund
+```{r}
+ec_annots <- read_rds("results/bin_EC_annotations.rds")
+
+
+EC_abund_per_sample <- percent_abund %>% 
+  dplyr::rename(bin = "genome") %>% 
+  left_join(ec_annots %>% dplyr::select(bin, EC = "db_id")) %>% 
+  group_by(sample, EC) %>% 
+  summarise(EC_abund = sum(percent_abund))
+  
+ECabund_mat <- EC_abund_per_sample %>% 
+  dplyr::select(sample, EC, EC_abund) %>% 
+  pivot_wider(names_from = "EC", values_from = EC_abund) %>% 
+  column_to_rownames("sample") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>% 
+  t()
+  
+# scale to counts with minimum of 1
+min_abund_ec <- min(ECabund_mat[ECabund_mat > 0])
+abund_mat_ec <- ECabund_mat * 1 / min_abund
+abund_mat_ec <- round(ECabund_mat)
+```
+
+### Aldex
+
+#### T-tests
+##### Syn vs allo
+```{r}
+SynAllo_metadata <- metadata %>%
+  filter(sample %in% colnames(abund_mat_ec)) %>% 
+  column_to_rownames("sample") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  mutate(transplant_type = factor(transplant_type,levels = c("Syngeneic","Allogeneic"),ordered = TRUE))
+
+aldex_abund_ec <- abund_mat_ec[,rownames(SynAllo_metadata)]
+
+treatments <- SynAllo_metadata %>% pull("transplant_type")
+
+if(!file.exists(paste0("results/functional/data/differentially_abundant_EC_pathways_syn_vs_allo.tsv"))){
+
+  aldex_out_ec <- ALDEx2::aldex(aldex_abund_ec, treatments, mc.samples=1000, test="t", include.sample.summary=FALSE, verbose=FALSE, denom = "all",effect = TRUE)
+
+  aldex_out_ec_w_names <- aldex_out_ec %>% 
+    rownames_to_column("path_num") %>% 
+    left_join(path_names_ec) %>% 
+    relocate(path_num, path_name)
+  
+  signif_aldex_out_ec <- aldex_out_ec_w_names %>% 
+    write_tsv(paste0("results/functional/data/differentially_abundant_EC_syn_vs_allo.tsv")) %>% 
+    filter(we.ep <= 0.05)
+
+
+```
+
+
+
+
+## Metacyc pathways from MinPath on EC annotations of bins from Bakta
+```{r}
+bin_minpath_ec <- system("ls data/omics/metagenomes/coassembly/bins/minpath/output_ec/*", intern = TRUE) %>% 
+  data.frame(path = .) %>% 
+  filter(!str_detect(path, "_detailed.txt"))
+
+read_minpath <- function(path){
+  bin <- basename(path) %>% str_remove("\\.txt")
+  
+  minpath_res <- read_tsv(path,col_names = FALSE,show_col_types = FALSE)
+  
+  minpath_res <- unglue::unglue_data(minpath_res$X1, "path {path_num} any n/a  naive {present_naive}  minpath {present_minpath}  fam0 {path_fam0}  fam-found {path_fam-found}  name  {path_name}") %>% 
+    mutate(bin = bin)
+}
+
+test <- read_minpath(bin_minpath_ec$path[1])
+
+minpath_res_ec <- map_df(bin_minpath_ec$path, read_minpath)
+
+
+bin_minpath_detailed_ec <- system("ls data/omics/metagenomes/coassembly/bins/minpath/output_ec/*.txt", intern = TRUE) %>% 
+  data.frame(path = .) %>% 
+  filter(str_detect(path, "_detailed.txt"))
+
+
+read_minpath_detailed_ec <- function(path){
+  bin <- basename(path) %>% str_remove("__detailed.txt")
+    
+  minpath_res_detailed <- suppressWarnings(read_delim(path,delim = "  ",col_names = FALSE,show_col_types = FALSE)) %>% 
+    mutate(pathway = if_else(str_detect(X1, "^path"), X1, NA_character_),
+           ko = if_else(str_detect(X1, "^   [0-9]"), str_trim(X1), NA_character_))
+    
+  minpath_res_detailed <- bind_cols(minpath_res_detailed, unglue::unglue_data(minpath_res_detailed$pathway, "path {path_num} fam0 {path_fam0} fam-found {path_fam-found} # {path_name}"))
+  
+  minpath_res_detailed <- bind_cols(minpath_res_detailed, unglue::unglue_data(minpath_res_detailed$ko, "{ec} hits {ec_hits} # {ec_name}"))
+  
+  minpath_res_detailed <- minpath_res_detailed %>% 
+    fill(starts_with("path")) %>% 
+    dplyr::select(-X1, -pathway, -ko) %>% 
+    filter(!is.na(ec)) %>% 
+    mutate(bin = bin) %>% 
+    type_convert()
+  
+}
+
+test <- read_minpath_detailed_ec(bin_minpath_detailed_ec$path[1])
+
+bin_paths_ec <- map_df(bin_minpath_detailed_ec$path, read_minpath_detailed_ec) %>% 
+  write_rds("results/functional/bin_minpath_detailed_ec.rds")
+
+bin_paths_ec <- read_rds("results/functional/bin_minpath_detailed_ec.rds")
+
+
+bin_path_abund_ec <- bin_paths_ec %>% 
+  group_by(bin, path_num, path_name) %>% 
+  summarise(path_abund = min(ec_hits)) %>% 
+  left_join(minpath_res_ec) %>% 
+  type_convert() %>% 
+  write_rds("results/functional/bin_minpath_ec.rds")
+
+bin_path_abund_ec <- read_rds("results/functional/bin_minpath_ec.rds")
+
+minpath_abund_ec <- bin_path_abund_ec %>% 
+  filter(present_minpath == 1,
+         !str_detect(path_num, "^05"), #filter out human specific
+         !str_detect(path_num, "^07"))
+
+path_names_ec <- minpath_abund_ec %>% 
+  ungroup() %>% 
+  dplyr::select(path_name, path_num) %>% 
+  distinct()
+```
+
+
+```{r}
+path_abund_per_sample_ec <- percent_abund %>% 
+  dplyr::rename(bin = "genome") %>% 
+  left_join(minpath_abund_ec) %>% 
+  mutate(adj_path_abund = present_minpath * percent_abund) %>% 
+  group_by(sample, path_num, path_name) %>% 
+  summarise(path_abund = sum(adj_path_abund))
+  
+path_abund_mat_ec <- path_abund_per_sample_ec %>% 
+  dplyr::select(sample, path_num, path_abund) %>% 
+  pivot_wider(names_from = "path_num", values_from = path_abund) %>% 
+  column_to_rownames("sample") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>% 
+  t()
+  
+# scale to counts with minimum of 1
+min_abund_ec <- min(path_abund_mat_ec[path_abund_mat_ec > 0])
+path_abund_mat_ec <- path_abund_mat_ec * 1 / min_abund
+path_abund_mat_ec <- round(path_abund_mat_ec)
+```
+
+### Aldex
+
+#### T-tests
+##### Syn vs allo
+```{r}
+SynAllo_metadata <- metadata %>%
+  filter(sample %in% colnames(path_abund_mat_ec)) %>% 
+  column_to_rownames("sample") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  mutate(transplant_type = factor(transplant_type,levels = c("Syngeneic","Allogeneic"),ordered = TRUE))
+
+aldex_path_abund_ec <- path_abund_mat_ec[,rownames(SynAllo_metadata)]
+
+treatments <- SynAllo_metadata %>% pull("transplant_type")
+
+if(!file.exists(paste0("results/functional/data/differentially_abundant_EC_pathways_syn_vs_allo.tsv"))){
+
+  aldex_out_path_ec <- ALDEx2::aldex(aldex_path_abund_ec, treatments, mc.samples=1000, test="t", include.sample.summary=FALSE, verbose=FALSE, denom = "all",effect = TRUE)
+
+  aldex_out_path_w_names_ec <- aldex_out_path_ec %>% 
+    rownames_to_column("path_num") %>% 
+    left_join(path_names_ec) %>% 
+    relocate(path_num, path_name)
+  
+  signif_aldex_out_path_ec <- aldex_out_path_w_names_ec %>% 
+    write_tsv(paste0("results/functional/data/differentially_abundant_EC_pathways_syn_vs_allo.tsv")) %>% 
+    filter(we.ep <= 0.05)
+
+} else {
+  aldex_out_path <- read_tsv(paste0("results/functional/data/differentially_abundant_EC_pathways_syn_vs_allo.tsv"))
+  
+  signif_aldex_out_path <- aldex_out_path %>% 
+    filter(we.ep <= 0.05)
+}
+
+allo_paths <- signif_aldex_out_path_ec %>% filter(effect > 1) %>% top_n(20,effect) %>% mutate(type = "Allogeneic",color = "blue")
+syn_paths <- signif_aldex_out_path_ec %>% filter(effect < -1) %>% top_n(20,-effect) %>% mutate(type = "Syngeneic",color = "orange")
+
+plot_paths <- bind_rows(allo_paths,syn_paths)
+
+(SynAllo_pathways <- plot_paths %>% ggplot(aes(reorder(path_name,effect), effect, fill = color)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_identity(guide = "legend", labels = plot_paths$type %>% unique()) +
+  labs(x = NULL, fill = NULL) +
+  theme_bw()
+  #theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0)) 
+)
+  
+ggsave(paste0("results/functional/figures/SynAllo_pathways_EC.png"),SynAllo_pathways,width = 5, height = 3.5, dpi = 600, scale = 2)
+```
+
+#### Full model
+```{r}
+mm <- model.matrix(~ transplant_type + gut_section + days_after_transplant, metadata %>% column_to_rownames("import_id") %>% .[colnames(path_abund_mat_ec),] %>% mutate(transplant_type = relevel(factor(transplant_type), "Syngeneic")))
+
+clr <- aldex.clr(path_abund_mat_ec,mm,mc.samples = 10)
+
+glm.test <- aldex.glm(clr, mm)
+
+glm_res_w_ECpath <- glm.test %>% 
+  rownames_to_column("path_num") %>% 
+    left_join(path_names_ec) %>% 
+    relocate(path_num, path_name) %>% 
+  write_rds("results/aldex_glm_results_ECpathways.rds")
+
+glm_res_w_ECpath <- read_rds("results/aldex_glm_results_ECpathways.rds")
+
+glm.effect <- aldex.glm.effect(clr)
+write_rds(glm.effect,"results/taxonomy/aldex_glm.effect_ECpathways.rds")
+```
+
+## Pathway tools annotations of MAGs
+
+```{r}
+pt_pathway_files <- system("ls data/omics/metagenomes/coassembly/bins/pathway_tools/*/pathways.col",intern = TRUE)
+
+pathways <- read_tsv("data/omics/metagenomes/coassembly/bins/pathway_tools/e6111c22064397420063023d35ea1be7_metadecoder_1224/pathways.col",comment = "#") %>% 
+  pivot_longer(-c(`UNIQUE-ID`, NAME),names_to = "col_name", values_to = "gene") %>% 
+  filter(!is.na(gene))
+
+
+read_PT_pathways <- function(path){
+  bin = path %>% dirname() %>% str_remove(".*/")
+  df <- read_tsv(path,show_col_types = FALSE, comment = "#") %>% 
+    pivot_longer(-c(`UNIQUE-ID`, NAME),names_to = "col_name", values_to = "gene") %>% 
+    filter(!is.na(gene)) %>% 
+    mutate(bin = bin)
+}
+
+PT_pathways_w_genes <- map_df(pt_pathway_files,read_PT_pathways)
+
+path_names_PT <- PT_pathways_w_genes %>% 
+  dplyr::rename(path_num = "UNIQUE-ID", path_name = "NAME") %>% 
+  select(path_num, path_name) %>% distinct()
+
+write_rds(PT_pathways_w_genes, "data/omics/metagenomes/coassembly/bins/pathway_tools/pathways_and_genes.rds")
+
+PT_pathways_w_genes <- read_rds("data/omics/metagenomes/coassembly/bins/pathway_tools/pathways_and_genes.rds")
+
+pathway_completion <- PT_pathways_w_genes  %>% 
+  select(-col_name,-gene) %>% 
+  distinct() %>% 
+  mutate(present = 1)
+
+
+
+
+
+
+
+path_abund_per_sample_PT <- percent_abund %>% 
+  dplyr::rename(bin = "genome") %>% 
+  left_join(pathway_completion %>% dplyr::rename(path_num = "UNIQUE-ID", path_name = "NAME")) %>% 
+  mutate(adj_path_abund = present * percent_abund) %>% 
+  group_by(sample, path_num, path_name) %>% 
+  summarise(path_abund = sum(adj_path_abund))
+  
+path_abund_mat_PT <- path_abund_per_sample_PT %>% 
+  dplyr::select(sample, path_num, path_abund) %>% 
+  pivot_wider(names_from = "path_num", values_from = path_abund) %>% 
+  column_to_rownames("sample") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>% 
+  t()
+  
+# scale to counts with minimum of 1
+min_abund_PT <- min(path_abund_mat_PT[path_abund_mat_PT > 0])
+path_abund_mat_PT <- path_abund_mat_PT * 1 / min_abund
+path_abund_mat_PT <- round(path_abund_mat_PT)
+```
+
+### Aldex
+#### T-tests
+##### Syn vs allo
+```{r}
+SynAllo_metadata <- metadata %>%
+  filter(sample %in% colnames(path_abund_mat_PT)) %>% 
+  column_to_rownames("sample") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic")) %>% 
+  mutate(transplant_type = factor(transplant_type,levels = c("Syngeneic","Allogeneic"),ordered = TRUE))
+
+aldex_abund_PT <- path_abund_mat_PT[,rownames(SynAllo_metadata)]
+
+treatments <- SynAllo_metadata %>% pull("transplant_type")
+
+if(!file.exists(paste0("results/functional/data/differentially_abundant_EC_pathways_syn_vs_allo.tsv"))){
+
+  aldex_out_PT <- ALDEx2::aldex(aldex_abund_PT, treatments, mc.samples=1000, test="t", include.sample.summary=FALSE, verbose=FALSE, denom = "all",effect = TRUE)
+
+  aldex_out_PT_w_names <- aldex_out_PT %>% 
+    rownames_to_column("path_num") %>% 
+    left_join(path_names_PT) %>% 
+    relocate(path_num, path_name)
+  
+  signif_aldex_out_ec <- aldex_out_ec_w_names %>% 
+    write_tsv(paste0("results/functional/data/differentially_abundant_EC_syn_vs_allo.tsv")) %>% 
+    filter(we.ep <= 0.05)
+
+
+```
+
+
+#### Full Aldex models
+```{r}
+mm <- model.matrix(~ transplant_type + gut_section + days_after_transplant, aldex_metadata)
+
+aldex_path_table <- path_abund_mat_PT[,rownames(mm)]
+
+clr <- aldex.clr(aldex_path_table,mm,mc.samples = 100, useMC = T)
+
+glm.test <- aldex.glm(clr, mm)
+
+glm_res_PT_dfs <- glm.test %>% 
+  rownames_to_column("path_num") %>% 
+  left_join(path_names_PT) %>% 
+  write_tsv("results/functional/data/pathway_abund_differences_FromPathwayToolsAnotations_fullAldexmodel.tsv")
+
+glm_res_w_ko_dfs <- read_tsv("results/functional/data/KO_fromBins_diffAbund_fullModel.tsv")
+```
+
+
+## POMS
+
+### Syn vs allo
+```{r}
+
+bin_tree <- ape::read.tree("data/omics/metagenomes/coassembly/bins/gtotree_dreped/gtotree_dreped.tre") %>% phytools::midpoint.root()
+
+bin_tree$node.label <- 1:length(bin_tree$node.label) %>% as.character() %>% paste0("n",.)
+
+shared_tips <- intersect(bin_tree$tip.label, colnames(vegan_abund)) %>% intersect(rownames(per_bin_ko_abund_wide))
+
+trimmed_tree <- bin_tree %>% ape::keep.tip(shared_tips) 
+
+filtered_abund <- vegan_abund %>% t() %>% as.data.frame() %>% .[shared_tips,] * 100 
+
+filtered_func <- per_bin_ko_abund_wide[shared_tips,]
+
+syn_samples <- metadata %>% 
+  filter(transplant_type =="Syngeneic") %>% 
+  pull("sample")
+
+allo_samples <- metadata %>% 
+  filter(transplant_type =="Allogeneic") %>% 
+  pull("sample")
+
+
+test2 <- phangorn::Children(bin_tree,"1071")[1]
+
+test <- bin_tree$tip.label
+
+
+POMS_out <- POMS::POMS_pipeline(abun = filtered_abund,
+                          func = filtered_func,
+                          tree = trimmed_tree,
+                          group1_samples = syn_samples,
+                          group2_samples = allo_samples,
+                          pseudocount = 1e-10,
+                          ncores = 1,
+                          min_num_tips = 4,
+                          multinomial_min_FSNs = 3,
+                          min_func_instances = 3,
+                          verbose = TRUE)
+
+POMS_result_df <- POMS_out$results %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>%
+  mutate(group_diff = num_FSNs_group1_enrich - num_FSNs_group2_enrich ) %>% 
+  arrange(multinomial_p) #%>% 
+  write_tsv("results/functional/POMS/syn_allo.tsv")
+
+POMS_result_df <- read_tsv("results/functional/POMS/syn_allo.tsv")
+
+sig_POMs_syn_v_allo <- POMS_result_df %>% 
+  filter(multinomial_p < 0.05) %>% 
+  arrange(multinomial_p)
+
+top10_POMs_syn_v_allo <- sig_POMs_syn_v_allo %>% 
+  slice_min(multinomial_p,n = 10)
+
+
+ko_abund_mat %>% 
+  filter(ko %in% top10_POMs_syn_v_allo$ko) %>% 
+  left_join(metadata) %>% 
+  left_join(ko_defs) %>% 
+  ggplot(aes(gut_section, ko_abund, color = plot_categories)) +
+  geom_boxplot() +
+  scale_color_manual(values = colors) +
+  scale_x_discrete(guide = guide_axis(angle = -45)) + 
+  facet_grid(~ko_definition, labeller = labeller(ko_definition = label_wrap_gen(10))) +
+  theme_bw()
+
+ggsave("results/functional/POMS/syn_v_allo_top10.png", width = 8, height = 3, scale = 2)
+```
+
+### Syn vs allo [day 7]
+```{r}
+
+bin_tree <- ape::read.tree("data/omics/metagenomes/coassembly/bins/gtotree_dreped/gtotree_dreped.tre") %>% phytools::midpoint.root()
+
+bin_tree$node.label <- 1:length(bin_tree$node.label) %>% as.character() %>% paste0("n",.)
+
+shared_tips <- intersect(bin_tree$tip.label, colnames(vegan_abund)) %>% intersect(rownames(per_bin_ko_abund_wide))
+
+trimmed_tree <- bin_tree %>% ape::keep.tip(shared_tips) 
+
+filtered_abund <- vegan_abund %>% t() %>% as.data.frame() %>% .[shared_tips,] * 100 
+
+filtered_func <- per_bin_ko_abund_wide[shared_tips,]
+
+syn_samples_day7 <- metadata %>% 
+  filter(transplant_type =="Syngeneic" & days_after_transplant == 7) %>% 
+  pull("sample")
+
+allo_samples_day7 <- metadata %>% 
+  filter(transplant_type =="Allogeneic" & days_after_transplant == 7) %>% 
+  pull("sample")
+
+POMS_out <- POMS::POMS_pipeline(abun = filtered_abund,
+                          func = filtered_func,
+                          tree = trimmed_tree,
+                          group1_samples = syn_samples_day7,
+                          group2_samples = allo_samples_day7,
+                          pseudocount = 1e-10,
+                          ncores = 1,
+                          min_num_tips = 4,
+                          multinomial_min_FSNs = 3,
+                          min_func_instances = 3,
+                          verbose = TRUE)
+
+POMS_result_df_SynAllo_day7 <- POMS_out$results %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>%  
+  arrange(multinomial_p) %>% 
+  write_tsv("results/functional/POMS/syn_allo.tsv")
+
+sig_POMs_SynAllo_day7 <- POMS_result_df_SynAllo_day7 %>% 
+  filter(multinomial_p < 0.05) %>% 
+  arrange(multinomial_p)
+
+top10_POMs_SynAllo_day7 <- sig_POMs_SynAllo_day7 %>% 
+  slice_min(multinomial_p,n = 10)
+
+
+ko_abund_mat %>% 
+  filter(ko %in% top10_POMs_SynAllo_day7$ko) %>% 
+  left_join(metadata) %>% 
+  left_join(ko_defs) %>% 
+  ggplot(aes(gut_section, ko_abund, color = plot_categories)) +
+  geom_boxplot() +
+  scale_color_manual(values = colors) +
+  scale_x_discrete(guide = guide_axis(angle = -45)) + 
+  facet_grid(~ko_definition, labeller = labeller(ko_definition = label_wrap_gen(10))) +
+  theme_bw()
+
+ggsave("results/functional/POMS/syn_v_allo_day7_top10.png", width = 8, height = 3, scale = 2)
+```
+
+### Syn vs allo [day 21]
+```{r}
+bin_tree <- ape::read.tree("data/omics/metagenomes/coassembly/bins/gtotree_dreped/gtotree_dreped.tre") %>% phytools::midpoint.root()
+
+bin_tree$node.label <- 1:length(bin_tree$node.label) %>% as.character() %>% paste0("n",.)
+
+shared_tips <- intersect(bin_tree$tip.label, colnames(vegan_abund)) %>% intersect(rownames(per_bin_ko_abund_wide))
+
+trimmed_tree <- bin_tree %>% ape::keep.tip(shared_tips) 
+
+filtered_abund <- vegan_abund %>% t() %>% as.data.frame() %>% .[shared_tips,] * 100 
+
+filtered_func <- per_bin_ko_abund_wide[shared_tips,]
+
+syn_samples_day21 <- metadata %>% 
+  filter(transplant_type =="Syngeneic" & days_after_transplant == 21) %>% 
+  pull("sample")
+
+allo_samples_day21 <- metadata %>% 
+  filter(transplant_type =="Allogeneic" & days_after_transplant == 21) %>% 
+  pull("sample")
+
+POMS_out <- POMS::POMS_pipeline(abun = filtered_abund,
+                          func = filtered_func,
+                          tree = trimmed_tree,
+                          group1_samples = syn_samples_day21,
+                          group2_samples = allo_samples_day21,
+                          pseudocount = 1e-10,
+                          ncores = 1,
+                          min_num_tips = 4,
+                          multinomial_min_FSNs = 3,
+                          min_func_instances = 3,
+                          verbose = TRUE)
+
+POMS_result_df_SynAllo_day21 <- POMS_out$results %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>%  
+  arrange(multinomial_p) %>% 
+  write_tsv("results/functional/POMS/syn_allo.tsv")
+
+sig_POMs_SynAllo_day21 <- POMS_result_df_SynAllo_day21 %>% 
+  filter(multinomial_p < 0.05) %>% 
+  arrange(multinomial_p)
+
+top10_POMs_SynAllo_day21 <- sig_POMs_SynAllo_day21 %>% 
+  slice_min(multinomial_p,n = 10)
+
+
+ko_abund_mat %>% 
+  filter(ko %in% top10_POMs_SynAllo_day21$ko) %>% 
+  left_join(metadata) %>% 
+  left_join(ko_defs) %>% 
+  ggplot(aes(gut_section, ko_abund, color = plot_categories)) +
+  geom_boxplot() +
+  scale_color_manual(values = colors) +
+  scale_x_discrete(guide = guide_axis(angle = -45)) + 
+  facet_grid(~ko_definition, labeller = labeller(ko_definition = label_wrap_gen(10))) +
+  theme_bw()
+
+ggsave("results/functional/POMS/syn_v_allo_day21_top10.png", width = 8, height = 3, scale = 2)
+```
+
+### Day 7 vs day 21
+```{r}
+day21_samples <- metadata %>% 
+  filter(days_after_transplant == 21) %>% 
+  pull("sample")
+
+day7_samples <- metadata %>% 
+  filter(days_after_transplant == 7) %>% 
+  pull("sample")
+
+
+test2 <- phangorn::Children(bin_tree,"1071")[1]
+
+test <- bin_tree$tip.label
+
+
+POMS_out_days <- POMS::POMS_pipeline(abun = filtered_abund,
+                          func = filtered_func,
+                          tree = trimmed_tree,
+                          group1_samples = day7_samples,
+                          group2_samples = day21_samples,
+                          pseudocount = 1e-10,
+                          ncores = 1,
+                          min_num_tips = 4,
+                          multinomial_min_FSNs = 10,
+                          min_func_instances = 3,
+                          verbose = TRUE)
+
+POMS_result_days_df <- POMS_out_days$results %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>% 
+  arrange(multinomial_p) %>% 
+  write_tsv("results/functional/POMS/day7_vs_day21.tsv")
+
+sig_POMs_days <- POMS_result_days_df %>% 
+  filter(multinomial_p < 0.05) %>% 
+  arrange(multinomial_p)
+
+top10_POMs_days <- sig_POMs_days %>% 
+  slice_min(multinomial_p,n = 10)
+
+ko_abund_mat %>% 
+  filter(ko %in% top10_POMs_days$ko) %>% 
+  left_join(metadata) %>% 
+  left_join(ko_defs) %>% 
+  ggplot(aes(gut_section, ko_abund, color = plot_categories)) +
+  geom_boxplot() +
+  scale_color_manual(values = colors) +
+  scale_x_discrete(guide = guide_axis(angle = -45)) + 
+  facet_grid(~ko_definition, labeller = labeller(ko_definition = label_wrap_gen(10))) +
+  theme_bw()
+
+ggsave("results/functional/POMS/day7_vs_day21_top10.png", width = 8, height = 3, scale = 2)
+
+```
+
+### Gut location 
+```{r}
+colors = c("#9a5ebd","#9dbfe0","#2083e6", "#dec8a6","#f09f26")
+
+TI_samples <- metadata %>% 
+  filter(gut_section == "Terminal ileum") %>% 
+  pull("sample")
+
+nonTI_samples <- metadata %>% 
+  filter(gut_section != "Terminal ileum") %>% 
+  pull("sample")
+
+POMS_out_loc <- POMS::POMS_pipeline(abun = filtered_abund,
+                          func = filtered_func,
+                          tree = trimmed_tree,
+                          group1_samples = TI_samples,
+                          group2_samples = nonTI_samples,
+                          pseudocount = 1e-10,
+                          ncores = 1,
+                          min_num_tips = 4,
+                          multinomial_min_FSNs = 10,
+                          min_func_instances = 3,
+                          verbose = TRUE)
+
+POMS_result_loc_df <- POMS_out_loc$results %>% 
+  rownames_to_column("ko") %>% 
+  left_join(ko_defs) %>%  
+  arrange(multinomial_p) %>% 
+  write_tsv("results/functional/POMS/TI_vs_otherLocs.tsv")
+  
+
+sig_POMs_loc <- POMS_result_loc_df %>% 
+  filter(multinomial_p < 0.05) %>% 
+  arrange(multinomial_p)
+
+top10_POMs_loc <- sig_POMs_loc %>% 
+  slice_min(multinomial_p,n = 10)
+
+ko_abund_mat %>% 
+  filter(ko %in% top10_POMs_loc$ko) %>% 
+  left_join(metadata) %>% 
+  left_join(ko_defs) %>% 
+  ggplot(aes(gut_section, ko_abund, color = plot_categories)) +
+  geom_boxplot() +
+  scale_color_manual(values = colors) +
+  scale_x_discrete(guide = guide_axis(angle = -45)) + 
+  facet_grid(~ko_definition, labeller = labeller(ko_definition = label_wrap_gen(10))) +
+  theme_bw()
+
+ggsave("results/functional/POMS/terminal_ileum_vs_others_top10.png", width = 8, height = 3, scale = 2)
+
+ko_abund_mat %>% 
+  filter(ko %in% "K03303") %>% 
+  left_join(metadata) %>% 
+  ggplot(aes(gut_section, ko_abund)) +
+  geom_boxplot() +
+  scale_x_discrete(guide = guide_axis(angle = -45)) + 
+  facet_grid(~ko)
+```
+
+
+# Pathview figures
+
+## Phenylalanine metabolism
+```{r}
+
+#Phenylalanine metabolism
+
+phenylalanine_metab_KOs <- kegg_def$kg.sets$`ko00360 Phenylalanine metabolism`
+
+pheynalanine_metab_cmpds <- pathview::
+
+
+
+ko_phenyl_all_effect_day21 <- glm_res_w_ko_dfs_day21 %>% 
+  filter(ko %in% phenylalanine_metab_KOs) %>% 
+  dplyr::select(ko,`transplant_typeAllogeneic:Est`) %>% 
+    arrange(desc(`transplant_typeAllogeneic:Est`))
+
+ko_effect <- ko_phenyl_all_effect_day21$`transplant_typeAllogeneic:Est` %>% `names<-`(ko_phenyl_all_effect_day21$ko)
+
+
+
+metabs_to_plot <- aldex_out_metab_w_names %>% 
+  select(cmpd_name,effect) %>% 
+  inner_join(metabolite_info %>% dplyr::select(cmpd_name = `Feature Name or Formula`, kegg_id)) %>% 
+  distinct() %>% 
+  filter(!is.na(kegg_id),
+         kegg_id != "NA")
+
+
+
+
+kegg_metabolites <- pathview::cpdidmap(in.ids = metabs_to_plot$hmdb_id, in.type = "HMDB accession",out.type = "KEGG COMPOUND accession")
+
+
+cpd_names <- pathview::cpd.names
+
+pathview::cpd.names
+
+metabolite_effects <- metabs_to_plot$effect %>% `names<-`(metabs_to_plot$kegg_id)
+
+
+pathview::pathview(gene.data = ko_effect,
+                   cpd.data = metabolite_effects,
+                   pathway.id = "00360",
+                   species = "ko")
+
+
+
+
+```
+
+
+
+
+
+
+
+
+

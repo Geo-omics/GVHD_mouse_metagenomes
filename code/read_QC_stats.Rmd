@@ -1,0 +1,257 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+knitr::opts_knit$set(root.dir = here::here())
+```
+
+Read QC stats
+```{r}
+
+QC_stats_fastp_fps <- system("ls data/omics/metagenomes/*/reads/*_read_count_fastp.tsv",intern = TRUE)
+
+QC_stats_Teal_fps <- system("ls data/omics/metagenomes/*/reads/*_read_count.tsv",intern = TRUE)
+
+states <- c("raw_reads", "deduped_reads", "filt_and_trimmed_reads", "decon_reads")
+
+fp <- QC_stats_fastp_fps[1]
+
+import_read_counts <- function(fp){
+  sample <- fp %>% str_remove(".*reads/") %>% str_remove("_read_count.*")
+  file <- read_tsv(fp) %>% 
+    pivot_longer(-read_state,names_to = "direction", values_to = "count") %>% 
+    mutate(sample = sample,
+           direction = str_remove(direction,"_read_count"),
+           read_state = factor(read_state, levels = states, ordered = TRUE))
+}
+
+
+QC_stats_fastp <- map_df(QC_stats_fastp_fps,import_read_counts) %>% 
+  arrange(sample, direction, read_state) %>% 
+  group_by(sample, direction) %>% 
+  mutate(percent_retained = count / lag(count) * 100,
+         percent_removed =  (lag(count) - count) / lag(count) * 100,
+         method = "Fastp")
+
+QC_stats_Teal <- map_df(QC_stats_Teal_fps,import_read_counts) %>% 
+  arrange(sample, direction, read_state) %>% 
+  group_by(sample, direction) %>% 
+  mutate(percent_retained = count / lag(count) * 100,
+         percent_removed =  (lag(count) - count) / lag(count) * 100,
+         method = "Teal")
+
+combined_QC_stats <- QC_stats_fastp %>% bind_rows(QC_stats_Teal)
+
+combined_QC_stats %>% 
+  filter(read_state =="decon_reads") %>% 
+  ggplot(aes(sample, count, fill = method)) +
+  geom_bar(stat = "identity",position = "dodge") +
+  coord_flip() +
+  scale_y_log10() 
+  #facet_grid(~method)
+
+long_qc_stats <- combined_QC_stats %>% 
+  pivot_longer(-c(read_state,direction,sample,method),names_to = "metric",values_to = "value") %>% 
+  pivot_wider(names_from ="method",values_from = "value")
+
+long_qc_stats %>% 
+  filter(metric == "count",
+         read_state =="decon_reads") %>% 
+  ggplot(aes(Teal,Fastp)) +
+  geom_point() + 
+  geom_abline(slope = 1, intercept = 0) +
+  scale_y_log10() +
+  scale_x_log10() +
+  facet_wrap(~read_state,scales = "free")
+```
+
+Snakemake benchmarks
+```{r}
+clumpify_benchmarks <- system("ls benchmarks/clumpify/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "clumpify")
+fastp_benchmarks <- system("ls benchmarks/fastp/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "fastp")
+dedup_benchmarks <- system("ls benchmarks/dedup/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "dedup")
+trim_and_remove_adapters_benchmarks <- system("ls benchmarks/trim_and_remove_adapters/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "trim_and_remove_adapters")
+remove_spike_ins_benchmarks <- system("ls benchmarks/remove_spike_ins/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "remove_spike_ins")
+remove_contaminants_benchmarks <- system("ls benchmarks/remove_contaminants/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "remove_contaminants")
+remove_spike_ins_fastp_benchmarks <- system("ls benchmarks/remove_spike_ins_fastp/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "remove_spike_ins_fastp")
+remove_contaminants_fastp_benchmarks <- system("ls benchmarks/remove_contaminants_fastp/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "remove_contaminants_fastp")
+remove_poly_pairs_benchmarks <- system("ls benchmarks/remove_poly_pairs/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "remove_poly_pairs")
+
+bbnorm_benchmarks <- system("ls benchmarks/bbnorm/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "bbnorm")
+metaspades_benchmarks <- system("ls benchmarks/metaspades/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "metaspades")
+megahit_benchmarks <- system("ls benchmarks/megahit/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "megahit")
+assembly_merge_benchmarks <- system("ls benchmarks/assembly/merge/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "assembly_merge")
+assembly_correction_benchmarks <- system("ls benchmarks/assembly/correct_contigs/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "assembly_correction")
+assembly_MEC_benchmarks <- system("ls benchmarks/assembly/MEC/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "MEC")
+
+predict_genes_and_calc_abundance_benchmarks <- system("ls benchmarks/predict_genes_and_calc_abundance/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "predict_genes_and_calc_abundance")
+align_to_uniref_benchmarks <- system("ls benchmarks/align_to_uniref/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "align_to_uniref")
+
+annotate_contigs_benchmarks <- system("ls benchmarks/annotate_contigs/*.txt",intern = TRUE) %>% data.frame(path = ., rule = "annotate_contigs")
+
+benchmark_fps <- dplyr::bind_rows(mget(ls(pattern = "*_benchmarks$"), envir = .GlobalEnv))
+
+#fp <- fastp_benchmarks[1]
+#rule_name <- "fastp"
+
+read_benchmark <- function(fp, rule_name){
+  sample <- fp %>% str_remove(".*/") %>% str_remove(".txt")
+  benchmark <- read_tsv(fp) %>% 
+    mutate(rule = rule_name, 
+           sample = sample) %>% 
+    select(-`h:m:s`)
+}
+
+
+benchmarks_all <- map2_df(benchmark_fps$path, benchmark_fps$rule, read_benchmark) %>% 
+  mutate(minutes = s / 60, 
+         hours = minutes / 60,
+         days = hours / 24)
+
+#fastp_bench_res <- map_df(fastp_benchmarks,read_benchmark,rule_name = "fastp")
+#dedup_bench_res <- map_df(dedup_benchmarks,read_benchmark,rule_name = "dedup")
+
+
+combined_stats <- bind_rows(fastp_bench_res,dedup_bench_res) %>% 
+  select(-`h:m:s`) %>% 
+  pivot_longer(-c(rule, sample), names_to = "stat", values_to = "value") %>% 
+  pivot_wider(names_from = "rule", values_from = "value")
+
+combined_stats %>% 
+  ggplot(aes(fastp, dedup)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0) +
+  scale_x_log10() +
+  scale_y_log10() +
+  facet_wrap(~stat)
+ 
+```
+
+
+## cumulative time plots
+
+Fastp version
+```{r}
+
+library(patchwork)
+
+fastp_order <- c("clumpify","fastp","remove_spike_ins_fastp", "remove_contaminants_fastp","bbnorm","metaspades")
+fastp_step_type <- c("QC", "QC","QC","QC","normalize", "assembly")
+
+fastp_steps <- data.frame(rule = fastp_order,
+                          rule_type = fastp_step_type) %>% 
+                mutate(rule = factor(rule, levels = fastp_order, ordered = TRUE))
+
+fastp_cumulative_time <- benchmarks_all %>% 
+  filter(rule %in% fastp_order) %>% 
+  mutate(rule = factor(rule, levels = fastp_order, ordered = TRUE)) %>% 
+  group_by(sample) %>% 
+  arrange(rule) %>%  
+  mutate(time_cumulative = cumsum(s) / 60,
+         pipeline_version = "fastp") %>% 
+  left_join(fastp_steps)
+
+
+(fastp_time_plot <- fastp_cumulative_time %>%  ggplot(aes(rule, s / 60, color = rule_type)) +
+  geom_boxplot() +
+  #scale_y_log10() +
+  labs( y = "minutes") +
+  theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0))
+)
+
+(fastp_time_plot_cumulative <- fastp_cumulative_time %>%  ggplot(aes(rule, time_cumulative, group = sample, color = rule_type)) +
+  geom_line() +
+  #scale_y_log10() +
+  theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0))
+)
+```
+
+
+Teal's version
+```{r}
+teal_order <- c("clumpify","dedup","trim_and_remove_adapters", "remove_spike_ins", "remove_contaminants", "remove_poly_pairs", "bbnorm","metaspades", "megahit", "assembly_merge", "assembly_correction", "MEC")
+
+teal_step_type <- c("QC","QC","QC","QC","QC","QC","normalize","assembly","assembly","assembly_merge", "assembly_merge", "assembly_merge")
+
+teal_steps <- data.frame(rule = teal_order,
+                         rule_type = teal_step_type) %>% 
+              mutate(rule = factor(rule, levels = teal_order, ordered = TRUE))
+
+teal_cumulative_time <- benchmarks_all %>% 
+  filter(rule %in% teal_order) %>% 
+  mutate(rule = factor(rule, levels = teal_order, ordered = TRUE)) %>% 
+  group_by(sample) %>% 
+  arrange(rule) %>% 
+  mutate(time_cumulative = cumsum(s) / 60,
+         pipeline_version = "teal") %>% 
+  left_join(teal_steps)
+
+(teal_time_plot <- teal_cumulative_time %>%  ggplot(aes(rule, s / 60, color = rule_type)) +
+  geom_boxplot() +
+  labs( y = "minutes") +
+  #scale_y_log10() +
+  theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0))
+)
+
+
+(teal_time_plot_cumulative <- teal_cumulative_time %>%  ggplot(aes(rule, time_cumulative, group = sample, color = rule_type)) +
+  geom_line() +
+  #scale_y_log10() +
+  theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0))
+)
+
+```
+
+
+Combined plots
+```{r}
+(teal_time_plot + fastp_time_plot) & lims(y = c(0,10000)) & scale_y_log10()
+
+
+(teal_time_plot_cumulative + fastp_time_plot_cumulative) & lims(y = c(0,10000))
+
+total_time_per_sample <- teal_cumulative_time %>% group_by(sample, pipeline_version) %>% 
+  summarise(minutes = sum(s / 60)) %>% 
+  bind_rows(fastp_cumulative_time %>% group_by(sample, pipeline_version) %>% 
+              summarise(minutes = sum(s / 60)))
+
+total_time_per_sample %>% 
+  ggplot(aes(pipeline_version,minutes / 60 / 24)) + 
+  labs(y = "days") +
+  geom_boxplot()
+
+total_time_per_sample %>% 
+  mutate(hours = minutes / 60) %>% 
+  select(-minutes) %>% 
+  pivot_wider(names_from = pipeline_version, values_from = hours) %>% 
+  mutate(time_diff = teal - fastp)
+
+merged_stats <- bind_rows(fastp_cumulative_time %>% mutate(rule = as.character(rule)), teal_cumulative_time %>% mutate(rule = as.character(rule))) # Can't bind factors with different levels/orders
+
+merged_stats %>% group_by(sample, rule_type, pipeline_version) %>% 
+  summarise(time_hr = sum(s)/60/60) %>% 
+  ggplot(aes(rule_type, time_hr, fill = pipeline_version)) +
+  geom_boxplot() +
+  facet_wrap(~rule_type,scales = "free")
+
+```
+
+
+
+Had to rename some bechmark files:
+```{}
+for_rename <- remove_contaminants_fastp_benchmarks$path %>% 
+  data.frame(orig = .) %>% 
+  mutate(sample = str_remove(orig, "benchmarks/remove_contaminants/") %>% str_remove("_fastp.txt"),
+         renamed = paste0("benchmarks/remove_contaminants_fastp/",sample,".txt"))
+
+file.rename(for_rename$orig, for_rename$renamed)
+
+```
+
+
+
+

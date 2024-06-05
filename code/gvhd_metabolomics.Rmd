@@ -1,0 +1,587 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = here::here())
+
+library(tidyverse)
+library(vegan)
+library(readxl)
+library(PMA)
+
+set.seed(2022)
+```
+
+Import metabolomics and metadata
+```{r}
+metab_pos <- read_excel("data/omics/metabolomics/EX01129_RP-POS_4BINNER+Named_20210818_181821_Bin_PP_final[1].xlsx", 
+    sheet = "QuickView")
+
+metab_neg <- read_excel("data/omics/metabolomics/EX01129_RP-NEG_4BINNER+Named_20210818_173700_Bin_PP_Final[1].xlsx", 
+    sheet = "QuickView")
+
+metabolite_info_pos <- read_excel("data/omics/metabolomics/EX01129_RP-POS_4BINNER+Named_20210818_181821_Bin_PP_final[1].xlsx", 
+    sheet = "DB Results") 
+
+metabolite_info_neg <- read_excel("data/omics/metabolomics/EX01129_RP-NEG_4BINNER+Named_20210818_173700_Bin_PP_Final[1].xlsx", 
+    sheet = "DB Results") 
+
+metabolite_info <- bind_rows(metabolite_info_neg,metabolite_info_pos)
+
+
+import_data <- read_tsv("data/import_log.tsv",col_names = FALSE) %>% 
+  dplyr::select(sample_id = "X1",
+         import_id = "X8") %>% 
+  distinct()
+
+metab_metadata <- read_tsv("data/sample_data/metadata.txt") %>% 
+  left_join(import_data) %>% 
+  filter(!is.na(import_id)) %>% 
+  mutate(transplant_type = if_else(str_detect(transplant_type, "Na.ve"), "Naive", transplant_type),
+         days_after_transplant = as.numeric(if_else(days_after_transplant == "N/A", "NA", days_after_transplant))) %>% 
+  mutate(gut_section = factor(gut_section, levels = c("Terminal ileum", "Cecum", "Transverse Colon", "Descending Colon"), ordered = TRUE),
+         gut_section_simp = factor(gut_section, levels = c("Terminal ileum", "Cecum", "Transverse Colon", "Descending Colon"), ordered = TRUE),
+         replicate = case_when(str_detect(researcher_sample_id, "A1") ~ "A",
+                               str_detect(researcher_sample_id, "A2") ~ "B",
+                               str_detect(researcher_sample_id, "A3") ~ "C",
+                               str_detect(researcher_sample_id, "S1") ~ "A",
+                               str_detect(researcher_sample_id, "S2") ~ "B",
+                               str_detect(researcher_sample_id, "S3") ~ "C",
+                               .default = "other"),
+         days_after_transplant = case_when(transplant_type == "Naive" ~ "other",
+                                           .default = as.character(days_after_transplant)),
+         days_after_transplant = factor(days_after_transplant,levels = c("7","21","other"), ordered = TRUE),
+         plot_categories = glue::glue("{transplant_type}; {days_after_transplant} days post"),
+         plot_categories = if_else(transplant_type == "Naive", "Naive", plot_categories),
+         plot_categories = factor(plot_categories,
+                                  levels = c("Naive","Syngeneic; 7 days post", "Syngeneic; 21 days post", "Allogeneic; 7 days post", "Allogeneic; 21 days post"), ordered = TRUE))
+
+
+# metadata <- read_excel("data/sample_data/sample_metadata.xlsx",skip = 3) %>% 
+#   rename(sample = 3)
+# 
+# metadata %>% relocate("sample") %>% write_tsv("data/omics/metabolomics/metadata.txt")
+# 
+# metadata_w_importIDs <- read_tsv("data/sample_data/metadata_w_importIDs.txt")
+
+simp_metab_pos <- metab_pos %>% 
+  rename(compound = "...3") %>% 
+  dplyr::select(compound,`20210811-EX01129-A003-IN0029-S00050720-A1-TI-P`:`20210811-EX01129-A003-IN0029-S00050771-N-DC-P`) %>% 
+  mutate(across(, ~if_else(.x == ".", "0", .x)),
+         across(, ~if_else(.x == "", "0", .x)),
+         across(, ~if_else(.x == " ", "0", .x))) %>% 
+  readr::type_convert() %>% 
+  filter(!is.na(compound)) %>%
+  pivot_longer(-compound, names_to = "sample", values_to = "abund") %>% 
+  mutate(sample = str_remove(sample,".*IN0029-S[0-9]*-"),
+         sample = str_remove(sample, "-P"),
+         abund = if_else(is.na(abund), 0, abund)) %>% 
+  #filter(!sample %in% c("TI-P","Ce-P","TC-P","DC-P")) %>% 
+  pivot_wider(names_from = sample, values_from = abund) %>% 
+  column_to_rownames("compound") %>% 
+  dplyr::select(-"A1-Ce") 
+
+simp_metab_neg <- metab_neg %>% 
+  rename(compound = "Feature Name or Formula") %>% 
+  dplyr::select(compound,starts_with("20210811-EX01129-A003-IN0029")) %>% 
+  mutate(across(, ~if_else(.x == ".", "0", .x)),
+         across(, ~if_else(.x == "", "0", .x)),
+         across(, ~if_else(.x == " ", "0", .x))) %>% 
+  readr::type_convert() %>% 
+  filter(!is.na(compound)) %>%
+  pivot_longer(-compound, names_to = "sample", values_to = "abund") %>% 
+  mutate(sample = str_remove(sample,".*IN0029-S[0-9]*-"),
+         sample = str_remove(sample, "-N"),
+         abund = if_else(is.na(abund), 0, abund)) %>% 
+  #filter(!sample %in% c("TI-P","Ce-P","TC-P","DC-P")) %>% 
+  pivot_wider(names_from = sample, values_from = abund) %>% 
+  column_to_rownames("compound") %>% 
+  dplyr::select( -"A1-Ce")
+
+metab_combined <- bind_rows(simp_metab_pos, simp_metab_neg) %>%
+  rownames_to_column("compound") %>% 
+  write_tsv("data/omics/metabolomics/combined_intensities.tsv") %>% 
+  pivot_longer(-compound, names_to = "researcher_sample_id", values_to = "value") %>%
+  mutate(researcher_sample_id = str_replace(researcher_sample_id,"-","_")) %>% 
+  left_join(metab_metadata %>% dplyr::select(researcher_sample_id, import_id)) %>%
+  dplyr::select(-researcher_sample_id) %>%
+  pivot_wider(names_from = "import_id", values_from = "value") %>% 
+  column_to_rownames("compound")
+
+metab_combined_norm_for_vegan <- metab_combined %>% 
+  rownames_to_column("compound") %>% 
+  pivot_longer(-compound, names_to = "sample", values_to = "abund") %>% 
+  mutate(
+    #abund = if_else(abund == 0, 1, abund),
+    sample = str_replace(sample,"-","_")) %>% 
+  pivot_wider(names_from = sample, values_from = abund) %>% 
+  column_to_rownames("compound") %>% 
+  as.matrix()
+
+abund_int_aldex <- round(metab_combined_norm_for_vegan)
+
+metab_combined_norm <- metab_combined_norm_for_vegan %>% 
+  t() %>% 
+  decostand(method = "hellinger") %>% 
+  t() %>% data.frame()
+  
+  
+metab_dist <- metab_combined_norm_for_vegan %>% 
+  as.matrix() %>% 
+  t() %>% 
+  #decostand(method = "hellinger", na.rm = TRUE) %>% 
+  vegdist(method = "robust.aitchison",na.rm = TRUE)
+
+nmds <- metaMDS(metab_dist)
+
+points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  mutate(sample_metab_name = str_remove_all(sample,"-P")) %>% 
+  left_join(metab_metadata %>% rename(sample_metab_name = "import_id"))
+
+points %>% 
+  filter(days_after_transplant != "N/A") %>% 
+  mutate(days_after_transplant = as.numeric(days_after_transplant)) %>% 
+  ggplot(aes(MDS1,MDS2, color = plot_categories, shape = gut_section)) +
+  geom_point() +
+  scale_color_manual(values = colors) +
+  labs(shape = "Gut section", 
+       color = "Treatment & time") +
+  theme_bw()
+ggsave("results/metabolomics/NMDS.png",width = 4, height =3, scale =1.5)
+ggsave("results/metabolomics/NMDS.pdf",width = 4, height =3, scale =1.5)
+```
+
+
+# PERMANOVA
+```{r}
+
+ordered_metadata <- metab_metadata %>% column_to_rownames("import_id") %>% .[labels(metab_dist),]
+
+(permanova_res_metab <- vegan::adonis2(metab_dist ~ gut_section + days_after_transplant * transplant_type, ordered_metadata))
+
+(permanova_res_metab <- vegan::adonis2(metab_dist ~ transplant_type + gut_section * days_after_transplant, ordered_metadata,by = "margin"))
+```
+
+
+
+# Plot based on classes
+```{r}
+scaled_metab <- metab_combined %>% 
+  t() %>% 
+  scale() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("import_id") %>% 
+  pivot_longer(-import_id, names_to = "metabolite",values_to = "intensity") %>% 
+  left_join(metab_metadata) %>% 
+  left_join(metabolite_info %>% dplyr::rename(metabolite = "Feature Name or Formula"))
+
+hellinger_scaled_metab <- metab_combined %>% 
+  t() %>% 
+  #decostand(method = "hellinger") %>%
+  as.data.frame() %>% 
+  rownames_to_column("import_id") %>% 
+  pivot_longer(-import_id, names_to = "metabolite",values_to = "intensity") %>% 
+  left_join(metab_metadata %>% dplyr::rename(sample = "researcher_sample_id")) %>% 
+  left_join(metabolite_info %>% dplyr::rename(metabolite = "Feature Name or Formula"))
+
+  
+(scaled_metab %>% 
+  group_by(import_id, transplant_type, gut_section, super_class, main_class) %>% 
+  summarise(summed_intensity = sum(intensity)) %>% 
+  ggplot(aes(main_class, transplant_type, fill = summed_intensity)) +
+  geom_tile() +
+  facet_wrap(~gut_section) +
+  scale_x_discrete(guide = guide_axis(angle = -45)) +
+  scale_fill_viridis_c()
+) #%>% plotly::ggplotly()
+
+scaled_by_class_metab <- scaled_metab %>% 
+  filter(transplant_type != "Naive") %>% 
+  group_by(import_id, transplant_type, gut_section, super_class, main_class) %>% 
+  summarise(summed_intensity = sum(intensity, na.rm = TRUE)) %>% 
+  group_by(gut_section, transplant_type, super_class, main_class) %>% 
+  summarise(scaled_metab = scale(summed_intensity) %>% sum(na.rm = TRUE) %>% as.numeric) %>% 
+  filter(!is.na(main_class),
+         scaled_metab != "NaN")
+  
+metab_hclust <- scaled_by_class_metab %>% 
+  ungroup() %>% 
+  dplyr::select(main_class, scaled_metab, transplant_type) %>% 
+  distinct() %>% 
+   #%>% 
+  column_to_rownames("transplant_type") %>% 
+  as.numeric() %>%  
+  vegdist() %>% 
+  hclust(method = "average")
+
+  scaled_by_class_metab %>%  ggplot(aes(main_class, transplant_type, fill = scaled_metab)) +
+  geom_tile() +
+  facet_wrap(~gut_section) +
+  scale_x_discrete(guide = guide_axis(angle = -45)) +
+  scale_fill_viridis_c()
+
+# (scaled_metab %>% 
+#   filter(super_class == "Fatty Acyls") %>% 
+#   ggplot(aes(transplant_type, intensity, label = metabolite)) +
+#   geom_point() +
+#   #geom_boxplot() +
+#   facet_wrap(~gut_section) +
+#   scale_x_discrete(guide = guide_axis(angle = -45)) +
+#   scale_fill_viridis_c()) %>% 
+#   plotly::ggplotly()
+
+
+```
+Metacoder plot from metabolites
+```{r}
+library(metacoder)
+
+allo_samples <- metab_metadata %>% 
+  filter(transplant_type == "Allogeneic") %>% 
+  pull(researcher_sample_id)
+
+syn_samples <- metab_metadata %>% 
+  filter(transplant_type == "Syngeneic") %>% 
+  pull(researcher_sample_id)
+
+metab_for_metacoder <- hellinger_scaled_metab %>% 
+  dplyr::select(sample, intensity, gut_section, transplant_type, super_class, main_class, sub_class) %>% 
+  group_by(sample, super_class, main_class, sub_class) %>% 
+  mutate(intensity = mean(intensity)) %>% 
+  filter(!is.na(super_class)) %>% 
+  mutate(taxonomy = str_glue("a__metabolite;b__{super_class};c__{main_class};d__{sub_class}"))
+
+sample_types <- c("Allogeneic", "Syngeneic")
+
+Allogeneic <- metab_for_metacoder %>%
+  filter(sample %in% allo_samples) %>% 
+  dplyr::select(sample, intensity, taxonomy) %>% 
+  group_by(taxonomy) %>% 
+  summarise(Allogeneic = mean(intensity))
+
+Syngeneic <- metab_for_metacoder %>%
+  filter(sample %in% syn_samples) %>% 
+  dplyr::select(sample, intensity, taxonomy) %>% 
+  group_by(taxonomy) %>% 
+  summarise(Syngeneic = mean(intensity))
+  
+met_table <- full_join(Allogeneic,Syngeneic) %>% 
+  #rownames_to_column("otu") %>% 
+  mutate(Combined = (Allogeneic + Syngeneic)/length(sample_types),
+         ratio = Allogeneic / Syngeneic) #For overall structure, equally weighted relative abundance between the sample types
+
+#Read parse the data for metacodeR and group all taxa lower than genus into their genus supertaxa
+obj <- parse_tax_data(met_table, class_cols = "taxonomy", class_sep = ";",
+                      class_key = c(tax_rank = "taxon_rank", tax_name = "taxon_name"),
+                      class_regex = "^(.+)__(.*)$") #%>% 
+        # metacoder::filter_taxa(taxon_ranks == "e", 
+        #                        supertaxa = TRUE,
+        #                        reassign_obs = TRUE, 
+        #                        subtaxa = FALSE,
+        #                        drop_obs = FALSE)
+
+#summing per-taxon counts
+obj$data$tax_abund <- calc_taxon_abund(obj, "tax_data",
+                                       cols = c(sample_types,"Combined")) 
+
+#Only plot organisms with abundance greater than threshold 
+thresh <- 0.01 #Rel.abund threshold to filter for plottting
+tab <- obj$data$tax_abund %>% dplyr::select(-taxon_id) %>% rowSums() > thresh
+
+obj <- filter_obs(obj,"tax_abund",tab)
+
+keep <- obj$data$tax_data$taxon_id %in% obj$data$tax_abund$taxon_id
+obj <- filter_obs(obj,"tax_data", keep)
+
+obj <- metacoder::filter_taxa(obj,unique(obj$data$tax_abund$taxon_id))
+
+#adds comparison data about type to the data
+obj$data$diff_table <- compare_groups(obj, data = "tax_abund",
+                                      cols = sample_types,
+                                      groups = sample_types)
+
+
+obj$data$tax_data <- NULL #otherwise plot gets confused looking for concrete (rel.abund)
+
+(tree <- obj %>%
+      heat_tree(
+                 node_size = Combined,
+                 node_label = taxon_names,
+                 node_color = log2_median_ratio,
+                 #node_color_range = viridis::viridis(3),
+                 node_color_range = c("#3279a8","grey80", "#ffc559"),
+                 node_color_trans = "linear",
+                 node_color_interval = c(3, -3),
+                 edge_color_interval = c(3, -3),
+                 node_size_axis_label = "Relative abundance",
+                 node_color_axis_label = "Log2 ratio median proportions",
+                 node_size_range = c(0.0005,0.05),
+                 node_label_size_range = c(.015,.02),
+                 node_label_max = 80,
+                 initial_layout = "reingold-tilford", layout = "davidson-harel",
+                 overlap_avoidance = 1.2))
+
+
+ggsave(plot = tree, "results/metabolites_syn_allo.pdf", device = cairo_pdf, width = 6, height = 6, dpi = 600)
+ggsave(plot = tree, "results/metabolites_syn_allo.png", type = "cairo", width = 6, height = 6, dpi = 600)
+```
+
+
+```{r}
+metab_for_metacoder <- hellinger_scaled_metab %>% 
+  dplyr::select(sample, intensity, gut_section, transplant_type, super_class, main_class, sub_class) %>% 
+  group_by(sample, super_class, main_class, sub_class) %>% 
+  mutate(intensity = mean(intensity)) %>% 
+  filter(!is.na(super_class)) %>% 
+  mutate(taxonomy = str_glue("a__metabolite;b__{super_class};c__{main_class};d__{sub_class}"))
+
+sample_types <- c("Terminal_Ileum", "Cecum", "Transverse_Colon", "Descending_Colon")
+
+descColon <- metab_for_metacoder %>%
+  filter(gut_section == "Descending Colon") %>% 
+  dplyr::select(sample, intensity, taxonomy) %>% 
+  group_by(taxonomy) %>% 
+  summarise(Descending_Colon = mean(intensity)) %>% 
+  column_to_rownames("taxonomy")
+
+transColon <- metab_for_metacoder %>%
+  filter(gut_section == "Transverse Colon") %>% 
+  dplyr::select(sample, intensity, taxonomy) %>% 
+  group_by(taxonomy) %>% 
+  summarise(Transverse_Colon = mean(intensity)) %>% 
+  column_to_rownames("taxonomy")
+  
+cecum <- metab_for_metacoder %>%
+  filter(gut_section == "Cecum") %>% 
+  dplyr::select(sample, intensity, taxonomy) %>% 
+  group_by(taxonomy) %>% 
+  summarise(Cecum = mean(intensity)) %>% 
+  column_to_rownames("taxonomy")
+
+termIleum <- metab_for_metacoder %>%
+  filter(gut_section == "Terminal ileum") %>% 
+  dplyr::select(sample, intensity, taxonomy) %>% 
+  group_by(taxonomy) %>% 
+  summarise(Terminal_Ileum = mean(intensity)) %>% 
+  column_to_rownames("taxonomy")
+
+
+met_table <- bind_cols(descColon,transColon,cecum,termIleum) %>% 
+  rownames_to_column("taxonomy") %>% 
+  mutate(Combined = (Terminal_Ileum + Cecum + Transverse_Colon + Descending_Colon)/length(sample_types)) #For overall structure, equally weighted relative abundance between the sample types
+
+#Read parse the data for metacodeR and group all taxa lower than genus into their genus supertaxa
+obj <- parse_tax_data(met_table, class_cols = "taxonomy", class_sep = ";",
+                      class_key = c(tax_rank = "taxon_rank", tax_name = "taxon_name"),
+                      class_regex = "^(.+)__(.*)$") #%>% 
+        # metacoder::filter_taxa(taxon_ranks == "d", 
+        #                        supertaxa = TRUE,
+        #                        reassign_obs = TRUE, 
+        #                        subtaxa = FALSE,
+        #                        drop_obs = FALSE)
+
+#summing per-taxon counts
+obj$data$tax_abund <- calc_taxon_abund(obj, "tax_data",
+                                       cols = c(sample_types,"Combined")) 
+
+#Only plot organisms with abundance greater than threshold 
+thresh <- 0.01 #Rel.abund threshold to filter for plottting
+tab <- obj$data$tax_abund %>% dplyr::select(-taxon_id) %>% rowSums() > thresh
+
+obj <- filter_obs(obj,"tax_abund",tab)
+
+keep <- obj$data$tax_data$taxon_id %in% obj$data$tax_abund$taxon_id
+obj <- filter_obs(obj,"tax_data", keep)
+
+obj <- metacoder::filter_taxa(obj,unique(obj$data$tax_abund$taxon_id))
+
+#adds comparison data about type to the data
+obj$data$diff_table <- compare_groups(obj, data = "tax_abund",
+                                      cols = sample_types,
+                                      groups = sample_types)
+
+obj$data$tax_data <- NULL #otherwise plot gets confused looking for concrete (rel.abund)
+colors <- c("#ef8a62","grey70", "#67a9cf")
+(gut_loc_heat_tree_matrix <- obj %>%
+heat_tree_matrix(data = "diff_table",
+                 node_size = Combined,
+                 key_size = 0.7,
+                 node_label = taxon_names,
+                 node_color = log2_median_ratio,
+                 # node_color_range = viridis::viridis(3),
+                 # row_label_color = viridis::viridis(3)[3],
+                 # col_label_color = viridis::viridis(3)[1],
+                 node_color_range = colors,
+                 row_label_color = colors[3],
+                 col_label_color = colors[1],
+                 node_color_trans = "linear",
+                 node_color_interval = c(-3, 3),
+                 edge_color_interval = c(-3, 3),
+                 node_size_axis_label = "Relative abundance",
+                 node_color_axis_label = "Log2 ratio median proportions",
+                 node_size_range = c(0.0005,0.05),
+                 node_label_size_range = c(.015,.02),
+                 node_label_max = 100,
+                 initial_layout = "reingold-tilford", layout = "davidson-harel",
+                 overlap_avoidance = 1.2))
+
+
+ggsave(plot = gut_loc_heat_tree_matrix, "results/metabolites_gut_location.pdf", device = cairo_pdf, width = 6, height = 6, dpi = 600)
+ggsave(plot = gut_loc_heat_tree_matrix, "results/metabolites_gut_location.png", type = "cairo", width = 6, height = 6, dpi = 600)
+```
+
+
+
+
+
+# Differential abund
+
+
+```{r}
+library(tidyverse)
+library(ALDEx2)
+
+aldex_metadata <- metab_metadata %>% 
+  #dplyr::rename(transplant_type = "Transplant type") %>% 
+  filter(transplant_type %in% c("Allogeneic","Syngeneic"),
+         researcher_sample_id %in% colnames(abund_int_aldex)) %>% 
+   mutate(transplant_type = relevel(factor(transplant_type), "Syngeneic")) %>% 
+  column_to_rownames("researcher_sample_id")
+
+aldex_abund_metab <- abund_int_aldex[,rownames(aldex_metadata)]
+
+treatments <- aldex_metadata %>% pull("transplant_type")
+
+aldex_out_metab <- aldex(aldex_abund_metab, treatments, mc.samples=100, test="t", effect=TRUE, include.sample.summary=FALSE, verbose=FALSE, denom = "all")
+
+aldex_out_metab_w_names <- bind_cols(compound = names(aldex_abund_metab),aldex_out_metab)
+
+saveRDS(aldex_out_metab_w_names,"results/metabolomics/data/aldex_out_metab.rds")
+
+
+aldex_out_metab_w_names <- read_rds("results/metabolomics/data/aldex_out_metab.rds") %>% 
+  rownames_to_column("cmpd_name") %>% 
+  left_join(metabolite_info %>% dplyr::rename(cmpd_name = "Feature Name or Formula"))
+
+
+
+aldex.plot(aldex_out_metab, type="MW")
+
+aldex.plot(aldex_out_metab, type="MA", test="welch", xlab="Log-ratio abundance",
+    ylab="Difference")
+aldex.plot(aldex_out_metab, type="MW", test="welch", xlab="Dispersion",
+    ylab="Difference")
+
+
+# aldex_out_w_names <- aldex_out_metab %>% 
+#  write_tsv("results/metabolomics/differential_abundance_syn_vs_all_all_samples.tsv")
+```
+
+
+
+```{r}
+aldex_out_w_names <- read_tsv("results/metabolomics/differential_abundance_syn_vs_all_all_samples.tsv")
+```
+
+
+```{r}
+mm <- model.matrix(~ transplant_type + gut_section + days_after_transplant, aldex_metadata)
+
+clr <- aldex.clr(aldex_abund_metab,mm,mc.samples = 10, useMC = T)
+
+glm.test <- aldex.glm(clr, mm)
+```
+
+
+
+```{r}
+library(rstatix)
+
+long_metab <- metab_combined %>% 
+  rownames_to_column("compound") %>% 
+  pivot_longer(-compound, names_to = "sample_id", values_to = "abund") %>% 
+   #mutate(sample = str_remove_all(sample,"-P"),
+   #      sample = str_replace(sample,"-","_")) %>% 
+  left_join(metab_metadata) %>% 
+  select(compound,sample_id,transplant_type, abund) %>% 
+  group_by(compound) %>% 
+  t_test(abund ~ transplant_type)
+```
+
+
+
+```{r}
+
+metab_combined_df <- as.data.frame(metab_combined)
+
+metab_filt <- metab_combined[rowSums(metab_combined ==0) <= 3, ]
+metab_filt <- log(1 + metab_filt, base = 10)
+
+microbe_abund <- read_rds("results/percent_abund.rds") %>% 
+  select(genome, sample, percent_abund) %>% 
+  pivot_wider(names_from = "sample", values_from = "percent_abund", values_fill = 0) %>% 
+  column_to_rownames("genome")
+
+microbe_filt <- microbe_abund[rowSums(microbe_abund ==0) <= 3, ]
+
+trans_metab <- t(metab_filt)
+metab_dist <- vegdist(trans_metab,method = "robust.aitchison")
+  
+trans_microbe <- t(microbe_filt)[rownames(trans_metab),]
+microbe_dist <- vegdist(trans_microbe,method = "robust.aitchison")
+
+# These sample distances based on KO abund were being produced for Mantel tests in another notebook (metacodeR comparisons?)
+ko_mat <- read_rds("results/bin_ko_abund.rds") %>% 
+  pivot_wider(names_from = "ko", values_from = "ko_abund",values_fill = 0) %>% 
+  filter(sample %in% rownames(trans_metab)) %>% 
+  column_to_rownames("sample") %>% 
+  .[rownames(trans_metab),]
+
+ko_dist <- vegdist(ko_mat,method = "robust.aitchison")
+
+ccaRes <- CCA(x = trans_microbe, z = trans_metab, penaltyx = 0.15, penaltyz = 0.15,niter = 100)
+
+ccaRes
+
+
+
+combined = cbind(trans_microbe[,ccaRes$u != 0],
+                 trans_metab[,ccaRes$v != 0])
+
+write_rds(combined, "results/CCA_multiomics_community_metabolite_simplified.rds")
+
+
+nmds <- metaMDS(vegdist(combined))
+
+points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  mutate(sample_metab_name = str_remove_all(sample,"-P")) %>% 
+  left_join(metab_metadata %>% rename(sample_metab_name = "sample_id"))
+
+
+env_res <- envfit(nmds, combined, permutations = 100, na.rm = TRUE)
+
+env_res_df <- env_res$vectors$arrows
+
+pcaRes = ade4::dudi.pca(combined, scannf = FALSE, nf = 3)
+
+points %>% 
+  filter(days_after_transplant != "N/A",
+         #gut_section != "Terminal ileum"
+         ) %>%
+  mutate(days_after_transplant = as.numeric(days_after_transplant)) %>% 
+  ggplot(aes(MDS1,MDS2, color = gut_section, shape = transplant_type, size = factor(days_after_transplant))) +
+  geom_point() +
+  labs(size = "Days after\ntransplant") +
+  theme_bw()
+
+```
+
+
+
+

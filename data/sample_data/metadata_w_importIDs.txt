@@ -1,0 +1,53 @@
+sample	study_id	file_id	researcher_sample_id	transplant_type	gut_section	n_mice_in_group	days_after_transplant	acid_water_administered	import_id
+c39841b318d0487eda9e0134e5c06381	S107	Sample_3728-EL-1	A1_TI	Allogeneic	Terminal ileum	5	7	Y	c39841b318d0487eda9e0134e5c06381
+96cbc159535df1ce1df7239e9bf660f1	S108	Sample_3728-EL-2	A1_Ce	Allogeneic	Cecum	5	7	Y	96cbc159535df1ce1df7239e9bf660f1
+0b5ea23b86f65770d95689b9767ab10e	S109	Sample_3728-EL-3	A1_TC	Allogeneic	Transverse Colon	5	7	Y	0b5ea23b86f65770d95689b9767ab10e
+d9b87562f950a07171764693c2dfc34d	S110	Sample_3728-EL-4	A1_DC	Allogeneic	Descending Colon	5	7	Y	d9b87562f950a07171764693c2dfc34d
+2f3b809474f7a7c4978f9527bbd74df7	S111	Sample_3728-EL-5	A2_TI	Allogeneic	Terminal ileum	5	7	Y	2f3b809474f7a7c4978f9527bbd74df7
+3673057a033be6311018337f99c25122	S112	Sample_3728-EL-6	A2_Ce	Allogeneic	Cecum	5	7	Y	3673057a033be6311018337f99c25122
+9942792e7f3ce9ce5410ba10a77e09c2	S113	Sample_3728-EL-7	A2_TC	Allogeneic	Transverse Colon	5	7	Y	9942792e7f3ce9ce5410ba10a77e09c2
+034865aa3bf7d7a3cd630a82cc5a23e9	S114	Sample_3728-EL-8	A2_DC	Allogeneic	Descending Colon	5	7	Y	034865aa3bf7d7a3cd630a82cc5a23e9
+dbdf473c9e421a727e80b359bdf91676	S115	Sample_3728-EL-9	A3_TI	Allogeneic	Terminal ileum	5	7	Y	dbdf473c9e421a727e80b359bdf91676
+1f1c6a3f970cbe368b4387b4a9280d14	S116	Sample_3728-EL-10	A3_Ce	Allogeneic	Cecum	5	7	Y	1f1c6a3f970cbe368b4387b4a9280d14
+72a241aea5e697733707f9f9f578fe3c	S117	Sample_3728-EL-11	A3_TC	Allogeneic	Transverse Colon	5	7	Y	72a241aea5e697733707f9f9f578fe3c
+abf526d4b5f3581a02e4d92f79aee440	S118	Sample_3728-EL-12	A3_DC	Allogeneic	Descending Colon	5	7	Y	abf526d4b5f3581a02e4d92f79aee440
+f0dd8f1e69a4d5da868f6bd376bfffec	S119	Sample_3728-EL-13	21A1_TI	Allogeneic	Terminal ileum	4	21	Y	f0dd8f1e69a4d5da868f6bd376bfffec
+2d624d93398d0c93f2821fc17d39ac7c	S120	Sample_3728-EL-14	21A1_Ce	Allogeneic	Cecum	4	21	Y	2d624d93398d0c93f2821fc17d39ac7c
+e6111c22064397420063023d35ea1be7	S121	Sample_3728-EL-15	21A1_TC	Allogeneic	Transverse Colon	4	21	Y	e6111c22064397420063023d35ea1be7
+fa88397911af2a92053e4ca8e7499894	S122	Sample_3728-EL-16	21A1_DC	Allogeneic	Descending Colon	4	21	Y	fa88397911af2a92053e4ca8e7499894
+8ce352f36985aec3a29cd246ccebb772	S123	Sample_3728-EL-17	21A2_TI	Allogeneic	Terminal ileum	4	21	Y	8ce352f36985aec3a29cd246ccebb772
+c91a6f055591f17caf785543c04a2322	S124	Sample_3728-EL-18	21A2_Ce	Allogeneic	Cecum	4	21	Y	c91a6f055591f17caf785543c04a2322
+5a6ee1d60eb91ef7de09be6aec01da26	S125	Sample_3728-EL-19	21A2_TC	Allogeneic	Transverse Colon	4	21	Y	5a6ee1d60eb91ef7de09be6aec01da26
+b057fefc7eefc9475ff404529224be8c	S126	Sample_3728-EL-20	21A2_DC	Allogeneic	Descending Colon	4	21	Y	b057fefc7eefc9475ff404529224be8c
+077eb3219b15c519f7b6692a5f53fcd6	S127	Sample_3728-EL-21	21A3_TI	Allogeneic	Terminal ileum	4	21	Y	077eb3219b15c519f7b6692a5f53fcd6
+0245e67227092c6391e231e929be7edd	S128	Sample_3728-EL-22	21A3_Ce	Allogeneic	Cecum	4	21	Y	0245e67227092c6391e231e929be7edd
+9740ab77268105d0ad46a1a7feca782e	S129	Sample_3728-EL-23	21A3_TC	Allogeneic	Transverse Colon	4	21	Y	9740ab77268105d0ad46a1a7feca782e
+69b5ce732973a6fbd88d3171035abc63	S130	Sample_3728-EL-24	21A3_DC	Allogeneic	Descending Colon	4	21	Y	69b5ce732973a6fbd88d3171035abc63
+29690e9b86af6990ce48affea53641b3	S131	Sample_3728-EL-25	S1_TI	Syngeneic	Terminal ileum	5	7	Y	29690e9b86af6990ce48affea53641b3
+d0161bed90236201d40c553b6d2f9e32	S132	Sample_3728-EL-26	S1_Ce	Syngeneic	Cecum	5	7	Y	d0161bed90236201d40c553b6d2f9e32
+229bd989595ffb82db178358221c7a88	S133	Sample_3728-EL-27	S1_TC	Syngeneic	Transverse Colon	5	7	Y	229bd989595ffb82db178358221c7a88
+7db60e61c6c3309448aa015ecd7dd57f	S134	Sample_3728-EL-28	S1_DC	Syngeneic	Descending Colon	5	7	Y	7db60e61c6c3309448aa015ecd7dd57f
+a8559993f9975fba547797cf4a37e9ee	S135	Sample_3728-EL-29	S2_TI	Syngeneic	Terminal ileum	5	7	Y	a8559993f9975fba547797cf4a37e9ee
+23ef494b7b4307465dab8b7794cad122	S136	Sample_3728-EL-30	S2_Ce	Syngeneic	Cecum	5	7	Y	23ef494b7b4307465dab8b7794cad122
+9da983ffa39fd57c6b795dce8884a639	S137	Sample_3728-EL-31	S2_TC	Syngeneic	Transverse Colon	5	7	Y	9da983ffa39fd57c6b795dce8884a639
+0a2ba56d29c8ed8b6840a5ba8e8cff49	S138	Sample_3728-EL-32	S2_DC	Syngeneic	Descending Colon	5	7	Y	0a2ba56d29c8ed8b6840a5ba8e8cff49
+2ea77481c11a622abe6ce2221e535c12	S139	Sample_3728-EL-33	S3_TI	Syngeneic	Terminal ileum	5	7	Y	2ea77481c11a622abe6ce2221e535c12
+9f4573a15f3884c4a0c1efabb39981f5	S140	Sample_3728-EL-34	S3_Ce	Syngeneic	Cecum	5	7	Y	9f4573a15f3884c4a0c1efabb39981f5
+0c39684a85664b4ecf1baf415c800484	S141	Sample_3728-EL-35	S3_TC	Syngeneic	Transverse Colon	5	7	Y	0c39684a85664b4ecf1baf415c800484
+1e9a32e65a88bb455bead7240d04d1a1	S142	Sample_3728-EL-36	S3_DC	Syngeneic	Descending Colon	5	7	Y	1e9a32e65a88bb455bead7240d04d1a1
+eca8e9620867e4cbfd67a9e0af78f8c9	S143	Sample_3728-EL-37	21S1_TI	Syngeneic	Terminal ileum	4	21	Y	eca8e9620867e4cbfd67a9e0af78f8c9
+4c228b0b7f0fa431767d9c8f2d6cf930	S144	Sample_3728-EL-38	21S1_Ce	Syngeneic	Cecum	4	21	Y	4c228b0b7f0fa431767d9c8f2d6cf930
+8e5063c5005f5fbb3d3f172e955b6a28	S145	Sample_3728-EL-39	21S1_TC	Syngeneic	Transverse Colon	4	21	Y	8e5063c5005f5fbb3d3f172e955b6a28
+4eb6bcba99e4988aaeef57dde4d264ea	S146	Sample_3728-EL-40	21S1_DC	Syngeneic	Descending Colon	4	21	Y	4eb6bcba99e4988aaeef57dde4d264ea
+744d41e57b5bcefeadce0451f45925f9	S147	Sample_3728-EL-41	21S2_TI	Syngeneic	Terminal ileum	5	21	Y	744d41e57b5bcefeadce0451f45925f9
+f11fc8241dd1beb8f9e141fdd5125113	S148	Sample_3728-EL-42	21S2_Ce	Syngeneic	Cecum	5	21	Y	f11fc8241dd1beb8f9e141fdd5125113
+df6f906562653569adf6544503e1892a	S149	Sample_3728-EL-43	21S2_TC	Syngeneic	Transverse Colon	5	21	Y	df6f906562653569adf6544503e1892a
+4f5d4a3bdeb0797088688cfd48f1829c	S150	Sample_3728-EL-44	21S2_DC	Syngeneic	Descending Colon	5	21	Y	4f5d4a3bdeb0797088688cfd48f1829c
+562d6e9ffed6c08cefe2dcc3741d54d8	S151	Sample_3728-EL-45	21S3_TI	Syngeneic	Terminal ileum	5	21	Y	562d6e9ffed6c08cefe2dcc3741d54d8
+512ae40922e16aed5a65a5e8bb2948e8	S152	Sample_3728-EL-46	21S3_Ce	Syngeneic	Cecum	5	21	Y	512ae40922e16aed5a65a5e8bb2948e8
+089706b3e3f4fcac15a0fdcd80cd8fcc	S153	Sample_3728-EL-47	21S3_TC	Syngeneic	Transverse Colon	5	21	Y	089706b3e3f4fcac15a0fdcd80cd8fcc
+d9e54bf563e2c90a88b8b33ecd1da027	S154	Sample_3728-EL-48	21S3_DC	Syngeneic	Descending Colon	5	21	Y	d9e54bf563e2c90a88b8b33ecd1da027
+a76f5532ee016025aa3bf8e5776c0596	S155	Sample_3728-EL-49	N_TI	Naive	Terminal ileum	3	N/A	N	a76f5532ee016025aa3bf8e5776c0596
+6e4f6603766224f8074fdf9b6cd294ef	S156	Sample_3728-EL-50	N_Ce	Naive	Cecum	3	N/A	N	6e4f6603766224f8074fdf9b6cd294ef
+675351d8c9faffb13b8bbbf5dca3eb7f	S157	Sample_3728-EL-51	N_TC	Naive	Transverse Colon	3	N/A	N	675351d8c9faffb13b8bbbf5dca3eb7f
+f18e8bc28e3de91a448441b561685cf3	S158	Sample_3728-EL-52	N_DC	Naive	Descending Colon	3	N/A	N	f18e8bc28e3de91a448441b561685cf3
