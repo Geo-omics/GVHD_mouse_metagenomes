@@ -1,0 +1,580 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = here::here())
+library(tidyverse)
+library(MOFA2)
+source(here::here("code/funcs.R"))
+
+set.seed(2022)
+conflicted::conflicts_prefer(dplyr::select(), dplyr::rename(), dplyr::filter())
+```
+
+Testing the example from tutorial
+
+```{r}
+set.seed(2020)
+
+# set number of samples and time points
+N <- 200
+time <- seq(0,1,length.out = N)
+
+# generate example data
+dd <- make_example_data(sample_cov = time, n_samples = N,
+                        n_factors = 4, n_features = 200, n_views = 4,
+                        lscales = c(0.5, 0.2, 0, 0))
+# input data
+data <- dd$data
+
+# covariate matrix with samples in columns
+time <- dd$sample_cov
+rownames(time) <- "time"
+```
+
+Looks like I'll need two "views" (matrices) in a special datatype, one for community abundance, one for metabolomics, maybe a third for gene content? \## Read in data
+
+```{r}
+metadata <- read_metaG_metadata()
+```
+
+### Community composition
+
+```{r}
+percent_abund <- read_rds("results/percent_abund.rds")
+
+rel.abund <- percent_abund %>% 
+  dplyr::select(taxonomy = "classification", Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy_id = "genome", percent_abund, sample) %>% 
+  pivot_wider(values_from = "percent_abund", names_from = "sample",values_fill = 0) %>% 
+  mutate(taxonomy = str_remove_all(taxonomy,"(;[a-z]__)+$"),
+         taxonomy = if_else(taxonomy == "Unclassified Bacteria", "d__Bacteria", taxonomy),
+         taxonomy = if_else(taxonomy == "Unclassified" | is.na(taxonomy) , "", taxonomy),
+         taxonomy = paste0("r__root;",taxonomy),
+         taxonomy = str_remove(taxonomy, ";$"))
+  
+rel_abund_long <- rel.abund %>% 
+  pivot_longer(any_of(metadata$sample), names_to = "sample",values_to = "rel_abund")
+
+vegan_abund <- percent_abund %>% 
+  ungroup() %>% 
+  dplyr::select(genome,sample, percent_abund) %>% 
+  distinct() %>% 
+  pivot_wider(names_from = sample, values_from = percent_abund, values_fill = 0) %>% 
+  column_to_rownames("genome") %>% 
+  t()
+```
+
+### Metabolomics
+
+```{r}
+metabolite_abund <- read_rds("data/metabolomics/combined.rds")
+
+metabolite_info <- read_rds("data/metabolomics/metabolite_info_combined.rds")
+
+named_metabolites <- metabolite_info %>%
+  select(`Compound Name`, `Feature Name or Formula`) %>%
+  filter(!is.na(`Compound Name`) | !str_detect(`Feature Name or Formula`, "^UNK_")) %>% 
+  mutate(`Compound Name` = if_else(is.na(`Compound Name`), `Feature Name or Formula`, `Compound Name`))
+
+named_metabolite_abund <- metabolite_abund %>%
+  rownames_to_column("compound") %>%
+  filter(compound %in% named_metabolites$`Feature Name or Formula`) %>%
+  column_to_rownames("compound")
+
+metabolite_abund_vegan <- read_rds("data/metabolomics/combined_vegan.rds")
+```
+
+### Gene abundance
+
+```{r}
+# Read in KO relative abundance
+ko_abund <- read_rds("results/bin_ko_abund.rds")
+
+ko_defs <- read_rds("results/ko_defs.rds")
+
+#read_rds("results/bin_ko_abund_per_bin.rds")
+```
+
+## Prep & merge data
+
+```{r}
+mofa_tax <- rel_abund_long %>% 
+  filter(!is.na(Class),
+         !is.na(Species)) %>% 
+  mutate(taxonomy = str_glue("{Domain}; {Phylum}; {Class}; {Order}; {Family}; {Genus}; {Species}")) %>% 
+  group_by(sample, Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy) %>% 
+  summarise(rel_abund = sum(rel_abund)) %>% 
+  ungroup() %>% 
+  select(sample, feature = "taxonomy", value = "rel_abund") %>% 
+  filter(value > 0) %>% 
+  mutate(value = log(value),
+         view = "tax_abund",
+         group = NA)
+
+# Look at distribution of tax abund data
+mofa_tax %>% ggplot(aes(value)) +
+  geom_histogram() #+
+  #scale_x_log10()
+
+mofa_metabolites <- named_metabolite_abund %>%
+  rownames_to_column("feature") %>%
+  pivot_longer(-feature,names_to = "sample", values_to = "value") %>%
+  filter(value > 0) %>%
+  mutate(value = log(value),
+  group = NA,
+  view = "metabolites")
+
+# Look at distribution of metabolite abund data
+mofa_metabolites %>% ggplot(aes(value)) +
+  geom_histogram() #+
+  #scale_x_log10()
+  
+# KEGG KO abund
+
+ko_names <- 
+
+mofa_ko <- ko_abund %>% 
+  select(sample, feature = "ko", value = "ko_abund") %>% 
+  mutate(group = NA,
+         view = "ko_abund",
+         value = log(value)) %>% 
+  filter(value > 0)
+  
+mofa_combined <- bind_rows(mofa_tax, 
+                           mofa_metabolites, 
+                           mofa_ko
+                           ) %>% 
+  select(-group) #%>%
+  #left_join(metadata %>% select(sample, group = "replicate"))
+
+```
+
+## MOFA analysis
+
+```{r}
+mofa_obj <- create_mofa_from_df(mofa_combined)
+
+plot_data_overview(mofa_obj)
+```
+
+```{r}
+model_opts <- get_default_model_options(mofa_obj)
+model_opts$num_factors <- 10
+
+mofa <- prepare_mofa(mofa_obj, model_options = model_opts)
+
+mofa_trained <- run_mofa(mofa,use_basilisk = TRUE)
+
+samples_metadata(mofa_trained) <- metadata
+
+fs::dir_create("data/mofa")
+write_rds(mofa_trained,"data/mofa/mofa_trained.rds")
+```
+
+```{r}
+plot_variance_explained(mofa_trained, plot_total = T)[[2]]
+```
+
+```{r}
+plot_variance_explained(mofa_trained, max_r2=15)
+```
+
+```{r}
+MOFA2::plot_factors(mofa_trained, 
+  factors = c(1,5), 
+   color_by = "plot_categories",
+  # shape_by = "gut_section",
+  #color_by = "gut_section",
+  #color_by = "days_after_transplant",
+  #shape_by = "plot_categories",
+  dot_size = 4
+) #+ scale_fill_manual(values=category.colors)
+```
+
+```{r}
+
+
+
+plot_factor(mofa_trained, 
+  factor = 1, 
+  color_by = "gut_section", 
+  dot_size = 4,
+  dodge = TRUE,
+  stroke = 0.4,
+  add_violin = T,
+  add_boxplot = T
+) +
+  #scale_fill_manual(values=category.colors) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+
+
+
+plot_factor(mofa_trained, 
+  factor = 5, 
+  color_by = "plot_categories", 
+  dot_size = 4,
+  dodge = TRUE,
+  stroke = 0.4,
+  add_violin = T,
+  add_boxplot = T
+) +
+  #scale_fill_manual(values=category.colors) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+```
+
+```{r}
+plot_weights_fn <- function(mofa, factor=1, view=1, nfeatures=10) {
+  p1 <- plot_weights(mofa, 
+    factors = factor, 
+    view = view,
+    nfeatures = nfeatures,
+    text_size = 4
+  )
+  
+  p2 <- plot_top_weights(mofa, 
+    factors = factor, 
+    view = view,
+    nfeatures = nfeatures
+  )
+  
+  p <- cowplot::plot_grid(plotlist=list(p1,p2), nrow=1)
+  return(p)
+}
+```
+
+```{r}
+plot_weights_fn(mofa_trained, factor=1, view="tax_abund", nfeatures=8)
+plot_weights_fn(mofa_trained, factor=1, view="metabolites", nfeatures=8)
+
+factor1_weights <- get_weights(mofa_trained,
+                               factors = ,
+                               as.data.frame = TRUE) %>% 
+  left_join(metabolite_info %>% 
+              select(feature = "Feature Name or Formula", 
+                     compound_name = "Compound Name",
+                     metab_super_class = "super_class",
+                     metab_main_class = "main_class",
+                     metab_sub_class = "sub_class") %>% 
+              mutate(view = "metabolites") %>% 
+              distinct()
+            ) %>% 
+  left_join(rel_abund_long %>% 
+              select(feature = "taxonomy_id", 
+                    Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy) %>% 
+              mutate(view = "tax_abund") %>% 
+              distinct()
+            ) %>% 
+  left_join(ko_defs %>% 
+              select(feature = "ko", 
+                    ko_definition) %>% 
+              mutate(view = "ko_abund") %>% 
+              distinct()
+            )
+
+factor5_weights <- get_weights(mofa_trained,
+                               factors = 5,
+                               as.data.frame = TRUE) %>% 
+  left_join(metabolite_info %>% 
+              select(feature = "Feature Name or Formula", 
+                     compound_name = "Compound Name",
+                     metab_super_class = "super_class",
+                     metab_main_class = "main_class",
+                     metab_sub_class = "sub_class") %>% 
+              mutate(view = "metabolites") %>% 
+              distinct()
+            ) %>% 
+  left_join(rel_abund_long %>% 
+              select(feature = "taxonomy_id", 
+                    Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy) %>% 
+              mutate(view = "tax_abund") %>% 
+              distinct()
+            ) %>% 
+  left_join(ko_defs %>% 
+              select(feature = "ko", 
+                    ko_definition) %>% 
+              mutate(view = "ko_abund") %>% 
+              distinct()
+            )
+
+
+
+plot_weights_fn(mofa_trained, factor=5, view="tax_abund", nfeatures=8)
+plot_weights_fn(mofa_trained, factor=5, view="metabolites", nfeatures=20)
+```
+
+```{r}
+plot_data_heatmap(mofa_trained, 
+  factor = 5, 
+  view = "tax_abund", 
+  features = 20,
+  denoise = FALSE,
+  cluster_rows = T, cluster_cols = F,
+  show_colnames = F, show_rownames = T,
+  annotation_samples = "plot_categories",  
+  #annotation_colors = list("Category"=category.colors), 
+  annotation_legend = F,
+  scale = "row"
+)
+```
+
+```{r}
+plot_data_scatter(mofa_trained, 
+  factor = 5, 
+  view = "tax_abund", 
+  features = 4,
+  dot_size = 3,
+  color_by = "plot_categories",
+  legend = F
+)
+
+
+```
+
+```{r}
+
+
+```
+
+## MEFEISTO
+
+```{r}
+mofa_obj <- create_mofa_from_df(mofa_combined)
+
+samples_metadata(mofa_obj) <- metadata %>% 
+  #dplyr::rename(group = "replicate") %>% 
+  mutate(numeric_gut_section = as.numeric(gut_section),
+         numeric_days_since_transplant = as.numeric(days_after_transplant),
+         numeric_days_since_transplant = if_else(plot_categories == "Naive", 0, numeric_days_since_transplant))
+
+mofa_obj_spatial <- set_covariates(mofa_obj,
+                                   covariates =  c("numeric_gut_section","numeric_days_since_transplant"))
+
+plot_data_overview(mofa_obj_spatial)
+```
+
+```{r}
+
+data_opts <- get_default_data_options(mofa_obj_spatial)
+
+
+model_opts_spatial <- get_default_model_options(mofa_obj_spatial)
+model_opts_spatial$num_factors <- 15
+
+mefisto_opts <- get_default_mefisto_options(mofa_obj_spatial)
+
+mofa_spatial <- prepare_mofa(mofa_obj_spatial, 
+                             model_options = model_opts_spatial,
+                             data_options = data_opts,
+                             mefisto_options = mefisto_opts,)
+
+mofa_spatial_trained <- run_mofa(mofa_spatial,use_basilisk = TRUE)
+
+
+
+fs::dir_create("data/mofa")
+write_rds(mofa_spatial_trained,"data/mofa/mofa_spatial_trained.rds")
+```
+
+```{r}
+plot_variance_explained(mofa_spatial_trained, plot_total = T)[[2]]
+```
+
+```{r}
+plot_variance_explained(mofa_spatial_trained, max_r2=15)
+```
+
+```{r}
+r <- plot_factor_cor(mofa_spatial_trained)
+```
+
+From [this](https://raw.githack.com/bioFAM/MEFISTO_tutorials/master/MEFISTO_spatial.html) tutorial:
+
+> The MOFA model has learnt scale parameters for each factor, which give us an indication of the smoothness per factor along the covariate (here space) and are between 0 and 1. A scale of 0 means that the factor captures variation independent of space, a value close to 1 tells us that this factor varys very smoothly along space.
+
+```{r}
+get_scales(mofa_spatial_trained)
+```
+
+```{r}
+plot_factors_vs_cov(mofa_spatial_trained) 
+```
+
+
+
+```{r}
+
+factor_pair <- c(1,5)
+
+
+MOFA2::plot_factors(mofa_spatial_trained, 
+  factors = factor_pair, 
+  color_by = "plot_categories",
+  # shape_by = "gut_section",
+  #color_by = "gut_section",
+  #color_by = "days_after_transplant",
+  #shape_by = "plot_categories",
+  dot_size = 4
+) #+ scale_fill_manual(values=category.colors)
+
+
+MOFA2::plot_factors(mofa_spatial_trained, 
+  factors = factor_pair, 
+  #color_by = "plot_categories",
+  # shape_by = "gut_section",
+  color_by = "gut_section",
+  #color_by = "days_after_transplant",
+  #shape_by = "plot_categories",
+  dot_size = 4
+) #+ scale_fill_manual(values=category.colors)
+```
+
+```{r}
+
+factors <- 1:10
+
+
+plot_factor_box <- function(fact_num, color_param){
+  plt <- (plot_factor(mofa_spatial_trained, 
+  factor = fact_num, 
+  color_by = color_param, 
+  dot_size = 4,
+  dodge = TRUE,
+  stroke = 0.4,
+  add_violin = T,
+  add_boxplot = T
+) +
+  #scale_fill_manual(values=category.colors) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  ))
+  
+  print(plt)
+}
+
+walk2(factors, "plot_categories", .f = plot_factor_box)
+walk2(factors, "gut_section", .f = plot_factor_box)
+
+```
+
+```{r}
+plot_weights_fn <- function(mofa, factor=1, view=1, nfeatures=10) {
+  p1 <- plot_weights(mofa, 
+    factors = factor, 
+    view = view,
+    nfeatures = nfeatures,
+    text_size = 4
+  )
+  
+  p2 <- plot_top_weights(mofa, 
+    factors = factor, 
+    view = view,
+    nfeatures = nfeatures
+  )
+  
+  p <- cowplot::plot_grid(plotlist=list(p1,p2), nrow=1)
+  return(p)
+}
+```
+
+
+```{r}
+factor1_weights_spatial <- get_weights(mofa_spatial_trained,
+                               factors = 1,
+                               as.data.frame = TRUE) %>% 
+  left_join(metabolite_info %>% 
+              select(feature = "Feature Name or Formula", 
+                     compound_name = "Compound Name",
+                     metab_super_class = "super_class",
+                     metab_main_class = "main_class",
+                     metab_sub_class = "sub_class") %>% 
+              mutate(view = "metabolites") %>% 
+              distinct()
+            ) %>% 
+  # left_join(rel_abund_long %>% 
+  #             select(feature = "taxonomy_id", 
+  #                   Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy) %>% 
+  #             mutate(view = "tax_abund") %>% 
+  #             distinct()
+  #           ) %>% 
+  left_join(ko_defs %>% 
+              select(feature = "ko", 
+                    ko_definition) %>% 
+              mutate(view = "ko_abund") %>% 
+              distinct()
+            )
+
+
+factor8_weights_spatial <- get_weights(mofa_spatial_trained,
+                               factors = 8,
+                               as.data.frame = TRUE) %>% 
+  left_join(metabolite_info %>% 
+              select(feature = "Feature Name or Formula", 
+                     compound_name = "Compound Name",
+                     metab_super_class = "super_class",
+                     metab_main_class = "main_class",
+                     metab_sub_class = "sub_class") %>% 
+              mutate(view = "metabolites") %>% 
+              distinct()
+            ) %>% 
+  left_join(rel_abund_long %>% 
+              select(feature = "taxonomy_id", 
+                    Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy) %>% 
+              mutate(view = "tax_abund") %>% 
+              distinct()
+            ) %>% 
+  left_join(ko_defs %>% 
+              select(feature = "ko", 
+                    ko_definition) %>% 
+              mutate(view = "ko_abund") %>% 
+              distinct()
+            )
+```
+
+
+```{r}
+plot_weights_fn(mofa_spatial_trained, factor=1, view="tax_abund", nfeatures=8)
+plot_weights_fn(mofa_spatial_trained, factor=1, view="metabolites", nfeatures=8)
+
+
+plot_weights_fn(mofa_spatial_trained, factor=5, view="tax_abund", nfeatures=8)
+plot_weights_fn(mofa_spatial_trained, factor=5, view="metabolites", nfeatures=20)
+```
+
+```{r}
+plot_data_heatmap(mofa_trained, 
+  factor = 5, 
+  view = "tax_abund", 
+  features = 20,
+  denoise = FALSE,
+  cluster_rows = T, cluster_cols = F,
+  show_colnames = F, show_rownames = T,
+  annotation_samples = "plot_categories",  
+  #annotation_colors = list("Category"=category.colors), 
+  annotation_legend = F,
+  scale = "row"
+)
+```
+
+```{r}
+plot_data_scatter(mofa_trained, 
+  factor = 5, 
+  view = "tax_abund", 
+  features = 4,
+  dot_size = 3,
+  color_by = "plot_categories",
+  legend = F
+)
+
+
+```
