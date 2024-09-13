@@ -1,0 +1,323 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = here::here("~/GVHD"))
+
+library(tidyverse)
+library(patchwork)
+library(vegan)
+library(dada2)
+source(here::here("code/funcs.R"))
+
+set.seed(2022)
+conflicted::conflicts_prefer(dplyr::select(), dplyr::rename(), dplyr::filter())
+```
+
+## Read 16S information
+From: Seike, K. et al. Ambient oxygen levels regulate intestinal dysbiosis and GVHD severity after allogeneic stem cell transplantation. Immunity (2023) doi:10.1016/j.immuni.2023.01.007.
+```{r}
+metadata <- read_tsv("~/projects/O2_dysbiosis_16S_data/data/metadata.tsv")
+```
+
+```{r}
+# OTU represenatative seqeunces
+rep_seqs <- Biostrings::readDNAStringSet("/nfs/turbo/lsa-gdick2/geomicro/data2/heinro/2022/M02127_336_Reddy/run4/israel.trim.contigs.good.unique.good.filter.unique.precluster.pick.pick.pick.opti_mcc.0.03.rep.fasta")
+
+# OTU abundance table
+rep_seqs_count <- read_tsv("/nfs/turbo/lsa-gdick2/geomicro/data2/heinro/2022/M02127_336_Reddy/run4/israel.trim.contigs.good.unique.good.filter.unique.precluster.pick.pick.pick.opti_mcc.0.03.rep.count_table")
+```
+
+Format GTDB r220 16S database for DADA2
+```{r}
+gtdb_16S <- Biostrings::readDNAStringSet("~/GVHD/data/16S_primers/combined_r220_reps_16S.fasta")
+
+gtdb_16S_names_df <- names(gtdb_16S) %>% 
+  data.frame(orig = .) %>% 
+  unglue::unglue_unnest(orig,"{genome} d__{domain};p__{phylum};c__{class};o__{order};f__{family};g__{genus};s__{species} [locus_tag={locus_tag}] [location={location}] [ssu_len={ssu_len}] [contig_len={contig_len}]",remove = FALSE) %>% 
+  mutate(new = str_glue("{domain};{phylum};{class};{order};{family};{genus};{species}(genome)"))
+
+gtdb_16S_DADA2 <- gtdb_16S %>% 
+  `names<-`(gtdb_16S_names_df$new) %>% 
+  Biostrings::writeXStringSet("~/GVHD/data/16S_primers/DADA2_formatted_combined_r220_reps_16S.fasta")
+```
+
+Prepare sequences to classify
+```{r}
+# Make names match abundance table
+seqs_to_class <- Biostrings::readDNAStringSet("/nfs/turbo/lsa-gdick2/geomicro/data2/heinro/2022/M02127_336_Reddy/run4/israel.trim.contigs.good.unique.good.filter.unique.precluster.pick.pick.pick.opti_mcc.0.03.rep.fasta") %>% 
+  data.frame(seqs =.,
+                header = names(.)) %>% 
+  mutate(unaligned_seq = str_replace_all(seqs, "-",""), # remove alignemnt gaps from sequences
+         otu = str_extract(header, "Otu\\d+"))
+
+seqs_to_class$unaligned_seq %>% 
+  Biostrings::DNAStringSet() %>% 
+  `names<-`(seqs_to_class$otu) %>% 
+  Biostrings::writeXStringSet("data/16S_primers/2018_amplicon_otu_reps.fasta")
+```
+
+```{r}
+# Classifications used in Seike et al
+original_tax <- read_tsv("~/projects/O2_dysbiosis_16S_data/data/2018_RDP_taxonomy.txt")
+```
+
+
+Classify sequences
+```{r}
+# Despite the names and r220 database pre-processing above, used the r207 references to classify sequence s
+rep_seqs_gtdb_r220_class <- dada2::assignTaxonomy(seqs = "data/16S_primers/2018_amplicon_otu_reps.fasta",
+                                                   #refFasta = "~/GVHD/data/16S_primers/DADA2_formatted_combined_r220_reps_16S.fasta",
+                                                   refFasta = "~/GVHD/data/16S_primers/GTDB_bac120_arc53_ssu_r207_fullTaxo.fa.gz",
+                                                   tryRC = TRUE,
+                                                   multithread = TRUE)
+
+df_rep_seqs_gtdb_r220_class <- as.data.frame(rep_seqs_gtdb_r220_class) %>% 
+  rownames_to_column("unaligned_seq") %>% 
+  left_join(seqs_to_class %>% 
+              select(unaligned_seq, otu)) %>% 
+  mutate(Genus = case_when(otu == "Otu0003" ~ "Escherichia",
+                           .default = Genus))
+```
+
+
+```{r}
+metadata_2018_16S <- read_tsv("~/projects/O2_dysbiosis_16S_data/data/metadata.tsv") %>% 
+  mutate(sample_type = "Amplicon",
+         gut_section = "Feces",
+         transplant_type = if_else(group == "grp_1", "Syngeneic", "Allogeneic"),
+         days_after_transplant = case_when(group %in% c("grp_1","grp_2") ~ "14" ))
+
+abund_tbl <- read_tsv("~/projects/O2_dysbiosis_16S_data/data/2018_abund_table.tsv")
+
+abund_tbl_long <- abund_tbl %>% 
+  pivot_longer(-c(label, Group, numOtus), names_to = "otu", values_to = "count") %>% 
+  select(sample = "Group", otu, count) %>% 
+  mutate(sample = str_glue("2018_{sample}")) %>% 
+  left_join(metadata_2018_16S) %>% 
+  filter(group %in% c("grp_1", "grp_2")) %>% 
+  group_by(sample) %>% 
+  mutate(rel_abund = count / sum(count),
+         percent_abund = (count / sum(count))*100) %>% 
+  left_join(df_rep_seqs_gtdb_r220_class)
+
+
+rel_abund_long_class_16S <- abund_tbl_long %>% 
+  group_by(sample,Domain = Kingdom,Phylum, Class, Order, Family, Genus) %>% 
+  summarise(percent_abund = sum(percent_abund)) %>% 
+  left_join(metadata_2018_16S) %>% 
+  mutate(sample_type = "Amplicon",
+         gut_section = "Feces",
+         transplant_type = if_else(group == "grp_1", "Syngeneic", "Allogeneic"))
+
+```
+
+
+## Read in metagenomic data for comparison
+```{r}
+
+metag_metadata <- read_metaG_metadata() 
+
+percent_abund_metag  <- read_rds("results/percent_abund.rds")
+
+rel.abund_metag <- percent_abund_metag %>% 
+  dplyr::select(taxonomy = "classification", Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy_id = "genome", percent_abund, sample) %>% 
+  pivot_wider(values_from = "percent_abund", names_from = "sample",values_fill = 0) %>% 
+  mutate(taxonomy = str_remove_all(taxonomy,"(;[a-z]__)+$"),
+         taxonomy = if_else(taxonomy == "Unclassified Bacteria", "d__Bacteria", taxonomy),
+         taxonomy = if_else(taxonomy == "Unclassified" | is.na(taxonomy) , "", taxonomy),
+         taxonomy = paste0("r__root;",taxonomy),
+         taxonomy = str_remove(taxonomy, ";$"))
+  
+rel_abund_long <- rel.abund_metag %>% 
+  pivot_longer(any_of(metag_metadata$sample), names_to = "sample",values_to = "rel_abund") %>% 
+  left_join(metag_metadata)
+
+rel_abund_long_class_metag <- rel_abund_long %>% 
+  mutate(Domain = case_when(Domain == "Unclassified Bacteria" ~ "Bacteria",
+                            .default = Domain)) %>% 
+  filter(Domain != "Unclassified") %>% 
+  group_by(sample) %>% 
+  mutate(rel_abund = (rel_abund / sum(rel_abund))*100) %>% 
+  group_by(sample, sample_id, Domain, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(percent_abund = sum(rel_abund,na.rm = TRUE)) %>% 
+  mutate(sample_type = "Metagenome") %>% 
+  left_join(metag_metadata)
+```
+
+## Combine data
+```{r}
+combined_abund <- rel_abund_long_class_metag %>% 
+  mutate(days_after_transplant = as.character(days_after_transplant)) %>% 
+  #select(sample, Domain, Phylum, Class,percent_abund) %>% 
+  bind_rows(rel_abund_long_class_16S %>% mutate(days_after_transplant = as.character(days_after_transplant))) %>% 
+            #  select(sample, Domain, Phylum, Class,percent_abund)
+            #) %>% 
+  mutate(days_after_transplant = factor(days_after_transplant, levels = c("7", "14", "21", "other"), ordered = TRUE),
+         sample_type = factor(sample_type, levels = c("Metagenome", "Amplicon"), ordered = TRUE),
+         gut_section = factor(gut_section, levels = c("Terminal ileum","Cecum","Transverse Colon", "Descending Colon", "Feces"), ordered = TRUE),
+         transplant_type = factor(transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic")))
+```
+
+
+### Compare diversity
+
+#### Beta-diversity
+```{r}
+combined_abund_wide_vegan <- combined_abund %>% 
+  ungroup() %>% 
+  select(sample, Domain, Phylum, Class, Order, Family, Genus, percent_abund) %>% 
+  pivot_wider(names_from = sample, values_from = percent_abund,values_fill = 0) %>% 
+  mutate(lineage = str_glue("{Domain};{Phylum};{Class};{Order};{Family};{Genus}")) %>% 
+  relocate(lineage) %>% 
+  select(-c(Domain, Phylum, Class,Order, Family, Genus)) %>% 
+  column_to_rownames("lineage") %>% 
+  t()
+
+bc_dists <- combined_abund_wide_vegan[rowSums(combined_abund_wide_vegan) > 0,] %>% 
+  vegan::vegdist()
+
+nmds <- bc_dists %>% 
+  vegan::metaMDS()
+
+nmds_points <- nmds$points %>% 
+  data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(combined_abund %>% ungroup()  %>% select(sample,sample_type,transplant_type,gut_section,days_after_transplant ) %>% distinct())
+  
+
+nmds_points %>% 
+  ggplot(aes(MDS1, MDS2,color = sample_type, shape = sample_type)) +
+  geom_point() +
+  theme_bw()
+```
+
+```{r}
+bc_dists_df <- bc_dists %>% 
+  as.matrix() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("s1") %>% 
+  pivot_longer(-s1, values_to = "dist", names_to = "s2") %>% 
+  left_join(metadata_2018_16S %>% 
+              select(sample, sample_type, gut_section, transplant_type) %>% 
+              bind_rows(metag_metadata %>% 
+                          select(sample, gut_section, transplant_type) %>%  
+                          mutate(sample_type = "metagenome")) %>% 
+              dplyr::rename(s1 = "sample", s1_gut_section = "gut_section", s1_transplant_type = "transplant_type", s1_sample_type = "sample_type")) %>% 
+  left_join(metadata_2018_16S %>% 
+              select(sample, sample_type, gut_section, transplant_type) %>% 
+              bind_rows(metag_metadata %>% 
+                          select(sample, gut_section, transplant_type) %>%  
+                          mutate(sample_type = "metagenome")) %>% 
+              dplyr::rename(s2 = "sample", s2_gut_section = "gut_section", s2_transplant_type = "transplant_type", s2_sample_type = "sample_type"))
+
+gut_sections <- c("Terminal ileum", "Cecum", "Transverse Colon", "Descending Colon")
+
+bc_dists_df %>% 
+  filter(s1_sample_type == "Amplicon",
+         s2_sample_type != "Amplicon") %>% 
+  mutate(s1_transplant_type = case_when(s1_transplant_type == "Allogeneic" ~ "Allogeneic feces",
+                                    s1_transplant_type == "Syngeneic" ~ "Syngeneic feces"),
+         s2_gut_section = factor(s2_gut_section, levels = gut_sections),
+         s2_transplant_type = factor(s2_transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic"))) %>% 
+  ggplot(aes(s2_gut_section, 1- dist, fill = s2_transplant_type)) + 
+  geom_boxplot() +
+  facet_wrap(~s1_transplant_type) +
+  scale_fill_manual(values = c("#9a5ebd","#2083e6", "#f09f26")) +
+  theme_bw() +
+  scale_x_discrete(guide = guide_axis(angle = -25)) +
+  labs(x = "Gut section", 
+       y = "Similarity [1 - Bray Curtis Dissimilarity]",
+       fill = NULL)
+
+ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity.png", width = 4, height =2, scale = 1.75)
+ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity.pdf", width = 4, height =2, scale = 1.75)
+ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity.eps", width = 4, height =2, scale = 1.75)
+
+```
+
+
+#### Alpha-diversity
+```{r}
+
+filt_combined_abund_wide_vegan <- combined_abund_wide_vegan
+filt_combined_abund_wide_vegan[filt_combined_abund_wide_vegan < 1] <- 0
+
+shannon_diversity <- filt_combined_abund_wide_vegan %>% 
+  vegan::diversity() %>% 
+  data.frame(Shannon = .) %>% 
+  rownames_to_column("sample") %>% 
+  left_join(metadata_2018_16S %>% 
+              select(sample, sample_type, gut_section, transplant_type,days_after_transplant) %>% 
+              bind_rows(metag_metadata %>% 
+                          select(sample, gut_section, transplant_type,days_after_transplant) %>%  
+                          mutate(sample_type = "Metagenome"))) %>% 
+  mutate(days_after_transplant = factor(days_after_transplant, levels = c("7", "14", "21", "other"), ordered = TRUE),
+         transplant_type = factor(transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic", ordered = TRUE)),
+         sample_type = factor(sample_type, levels = c("Metagenome", "Amplicon"), ordered = TRUE),
+         gut_section = factor(gut_section, levels = c("Terminal ileum","Cecum","Transverse Colon", "Descending Colon", "Feces"), ordered = TRUE)) %>% 
+  filter(days_after_transplant %in% c("21","14"))
+
+my_comparisons <- list(c("Allogeneic", "Syngeneic")
+                       #c("Allogeneic", "Naive"), 
+                       #c("Syngeneic", "Naive")
+                       )
+
+ggpubr::ggboxplot(shannon_diversity, x= "transplant_type", y = "Shannon", fill  = "transplant_type") +
+  #ggpubr::stat_compare_means(method = "t.test",comparisons = my_comparisons) +
+  #ggplot(aes(transplant_type, Shannon, fill = transplant_type)) +
+  #geom_boxplot(outliers = FALSE) +
+  ggbeeswarm::geom_quasirandom() +
+  #
+  ggh4x::facet_nested(~sample_type + str_wrap(gut_section,width = 8),scales = "free_x") +
+  theme_bw() +
+  labs(y = "Shannon diveristy",
+       x = NULL,
+       fill = NULL) + 
+  scale_fill_manual(values = c("#2083e6", "#f09f26")) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),legend.position = "bottom")
+
+ggsave("results/16S-feces_vs_metagenome_diversity.png",width = 3, height = 2, scale = 1.75)
+ggsave("results/16S-feces_vs_metagenome_diversity.pdf",width = 3, height = 2, scale = 1.75)
+ggsave("results/16S-feces_vs_metagenome_diversity.eps",width = 3, height = 2, scale = 1.75)
+
+
+```
+
+
+
+```{r}
+combined_abund_wide <- combined_abund %>% 
+  ungroup() %>% 
+  select(sample, Domain, Phylum, Class, Order, Family, Genus,percent_abund) %>% 
+  pivot_wider(names_from = sample, values_from = percent_abund,values_fill = 0) %>% 
+  mutate(lineage = str_glue("{Domain};{Phylum};{Class};{Order};{Family};{Genus}")) %>% 
+  relocate(lineage) #%>% 
+  # select(-c(Domain, Phylum, Class, Order,Family , Genus)) %>% 
+  # column_to_rownames("lineage")
+
+combined_abund %>% 
+  mutate(lineage = str_glue("{Domain};{Phylum};{Class};{Order}")) %>% 
+  relocate(lineage) %>%
+  filter(gut_section %in% c("Feces", "Descending Colon")) %>% 
+  ggplot(aes(sample, percent_abund, fill = lineage)) +
+  geom_bar(stat = "identity") +
+  ggh4x::facet_nested(~sample_type + transplant_type,scales = "free_x") +
+  #facet_grid(~sample_type,scales = "free_x") +
+  theme_bw() +
+  labs(x = NULL, 
+       y = "% abundance", 
+       fill = "Order")  +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+ggsave("results/16S-feces_vs_metagenome_descending_colon-comparison.png", width = 6, height =2, scale = 4)
+ggsave("results/16S-feces_vs_metagenome_descending_colon-comparison.pdf", width = 6, height =2, scale = 4)
+ggsave("results/16S-feces_vs_metagenome_descending_colon-comparison.eps", width = 6, height =2, scale = 4)
+
+```
+
+
