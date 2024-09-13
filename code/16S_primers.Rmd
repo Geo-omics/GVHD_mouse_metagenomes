@@ -1,0 +1,111 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = here::here("~/GVHD"))
+library(tidyverse)
+library(ggpubr)
+library(ggtext)
+library(patchwork)
+library(vegan)
+library(ggnewscale)
+#library(ggtree)
+#library(dada2)
+library(DECIPHER)
+library(DBI)
+source(here::here("code/funcs.R"))
+
+set.seed(2022)
+```
+
+## Genus specific 16S primers
+
+Creating genus specific 16S primers using the DECIPHER R package and GTDB or SILVA databases
+
+Align GTDB 16S sequences
+```{bash}
+ mafft --auto --adjustdirection --thread 48 data/16S_primers/combined_r207_reps_16S.fna > data/16S_primers/combined_r207_reps_16S.afa
+```
+
+```{r}
+# specify a path for where to write the sequence database
+dbConn_path <- "data/16S_primers/decipher_db.sqlite"
+
+dbConn <- dbConnect(RSQLite::SQLite(), dbConn_path)
+fs::dir_create(dirname(dbConn_path))
+
+Seqs2DB("data/16S_primers/combined_r207_reps_16S.afa", "FASTA", dbConn, "gtdb_r207_16S")
+
+# get the FASTA record description
+#desc <- dbGetQuery(dbConn, "select description from Seqs")
+
+# Parse the taxonomy from fasta headers in the sqlite database
+seqs2 <- tbl(dbConn, "Seqs") %>% 
+  collect() %>% 
+  mutate(full_tax = description %>% str_remove("\\[locus.*") %>% str_remove(".*d__")) %>% 
+  separate(full_tax,into = c("domain", "phylum", "class", "order", "family", "genus", "species"),sep = ";[a-z]__",remove = FALSE) %>% 
+  mutate(identifier = str_glue("{domain};{phylum};{class};{order};{family};{genus}")) %>% 
+  copy_to(df = ., dest = dbConn,name = "Seqs", overwrite = TRUE,temporary = FALSE)
+
+# Create an identifier with concatenated tax to genus level
+# genus_ident <- taxonomy %>% select(row_names, identifier = "full_genus")
+# 
+# dbWriteTable(dbConn,"seqids", genus_ident,overwrite = TRUE)
+# 
+# # Add genus level identifier to the sqlite database
+# Add2DB(genus_ident, dbConn)
+
+```
+
+```{r}
+tiles <- TileSeqs(dbConn, add2tbl="Tiles", minCoverage=1,processors = 48)
+```
+
+
+# GTDB r220
+
+```{r}
+# specify a path for where to write the sequence database
+dbConn_path_r220 <- "data/16S_primers/decipher_db_GTDB_r220.sqlite"
+
+dbConn_r220 <- dbConnect(RSQLite::SQLite(), dbConn_path_r220)
+fs::dir_create(dirname(dbConn_path_r220))
+
+Seqs2DB("data/16S_primers/combined_r220_reps_16S.afa", "FASTA", dbConn_r220, "gtdb_r220_16S")
+
+# get the FASTA record description
+#desc <- dbGetQuery(dbConn, "select description from Seqs")
+
+# Parse the taxonomy from fasta headers in the sqlite database
+seqs2_r220 <- tbl(dbConn_r220, "Seqs") %>% 
+  collect() %>% 
+  mutate(full_tax = description %>% str_remove("\\[locus.*") %>% str_remove(".*d__")) %>% 
+  separate(full_tax,into = c("domain", "phylum", "class", "order", "family", "genus", "species"),sep = ";[a-z]__",remove = FALSE) %>% 
+  mutate(identifier = str_glue("{domain};{phylum};{class};{order};{family};{genus}")) %>% 
+  copy_to(df = ., dest = dbConn_r220,name = "Seqs", overwrite = TRUE,temporary = FALSE)
+
+seqs2_r220_local <- tbl(dbConn_r220, "Seqs") %>% 
+  collect() %>% 
+  mutate(full_tax = description %>% str_remove("\\[locus.*") %>% str_remove(".*d__")) %>% 
+  separate(full_tax,into = c("domain", "phylum", "class", "order", "family", "genus", "species"),sep = ";[a-z]__",remove = FALSE) %>% 
+  mutate(identifier = str_glue("{domain};{phylum};{class};{order};{family};{genus}"))
+
+# Create an identifier with concatenated tax to genus level
+# genus_ident <- taxonomy %>% select(row_names, identifier = "full_genus")
+# 
+# dbWriteTable(dbConn,"seqids", genus_ident,overwrite = TRUE)
+# 
+# # Add genus level identifier to the sqlite database
+# Add2DB(genus_ident, dbConn)
+
+```
+
+```{r}
+tiles <- TileSeqs(dbConn_r220, add2tbl="Tiles", minCoverage=1,processors = 48)
+
+write_rds(tiles, "data/16S_primers/tiles_GTDB_r220.sqlite")
+```
+
+
