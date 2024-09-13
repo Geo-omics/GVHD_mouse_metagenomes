@@ -944,6 +944,176 @@ ggsave("results/differential_abundance_genus.png", width = 5, height = 3, scale 
 ```
 
 
+# Abundance heatmap
+```{r}
+genus_percent_abund <- rel_abund_long %>% 
+  select(-Species) %>% 
+  filter(!is.na(Phylum),
+         !is.na(Genus),
+          Genus != "") %>% 
+  group_by(Domain,Phylum, Class, Order,Family, Genus, sample) %>% 
+  summarise(percent_abund = sum(rel_abund)) %>% 
+  left_join(read_metaG_metadata())
+
+clr_genus_abund <- genus_abund %>% 
+  ungroup() %>% 
+  select(sample, percent_abund, Genus) %>% 
+  distinct() %>% 
+  pivot_wider(names_from = sample,values_from = percent_abund,values_fill = 0) %>%
+  mutate(across(where(is.numeric), ~ compositions::clr(as.numeric(.x)))) %>% 
+  pivot_longer(-Genus, names_to = "sample", values_to = "clr")
+
+genus_abund <- genus_percent_abund %>% 
+  left_join(clr_genus_abund) %>% 
+  mutate(transplant_type = factor(transplant_type, levels = c("Syngeneic", "Allogeneic", "Naive"), ordered = TRUE))
+
+genus_variance <- genus_abund %>% 
+  group_by(Domain,Phylum, Class, Order,Family, Genus) %>%
+  summarise(variance = var(clr)) %>% 
+  arrange(desc(variance))
+
+most_variant_genera <- genus_variance %>% 
+  ungroup() %>% 
+  slice_max(n = 50,order_by = variance, with_ties = FALSE) %>% 
+  arrange(desc(variance))
+
+variant_genera_vec  <- most_variant_genera$Genus %>% unique()
+
+most_variant_genera_hclust <- genus_abund %>% 
+  filter(Genus %in% variant_genera_vec) %>%
+  ungroup() %>% 
+  select(sample, percent_abund, Genus) %>% 
+  distinct() %>% 
+  pivot_wider(names_from = sample,values_from = percent_abund,values_fill = 0) %>% 
+  column_to_rownames("Genus") %>% 
+  vegdist() %>% 
+  hclust(method = "average")
+
+hclust_order <- most_variant_genera_hclust$labels[most_variant_genera_hclust$order]
+
+sample_hclust <- genus_abund %>% 
+  filter(Genus %in% variant_genera_vec) %>%
+  ungroup() %>% 
+  select(sample, percent_abund, Genus) %>% 
+  distinct() %>% 
+  pivot_wider(names_from = sample,values_from = percent_abund,values_fill = 0) %>% 
+  column_to_rownames("Genus") %>% 
+  t() %>% 
+  vegdist() %>% 
+  hclust(method = "average")
+
+sample_hclust_order <- sample_hclust$labels[sample_hclust$order]
+
+(sample_section_bar <- genus_abund %>% 
+  mutate(sample = factor(sample, levels = (sample_hclust_order), ordered = TRUE)) %>% 
+  ggplot(aes(sample, 1, fill = gut_section)) +
+  geom_tile() +
+  ggh4x::scale_x_dendrogram(hclust = sample_hclust,position = "top") +
+  scale_fill_viridis_d(option = "mako",direction = -1) +
+    geom_tile(color = "grey70") +
+    theme(axis.ticks = element_blank(),
+          axis.text = element_blank(),
+          panel.grid = element_blank(),
+          axis.title = element_blank(),
+          plot.margin = margin(0, 0, 0, 0, "pt")) +
+    labs(fill = "Gut section")
+)
+  
+(sample_day_bar <- genus_abund %>% 
+  mutate(sample = factor(sample, levels = (sample_hclust_order), ordered = TRUE)) %>% 
+  ggplot(aes(sample, 1, fill = days_after_transplant)) +
+  geom_tile(color = "grey70") +
+  scale_fill_viridis_d(option = "rocket",direction = -1,begin = 0.25,end = 0.9) +
+  theme_minimal() +
+    theme(axis.ticks = element_blank(),
+          axis.text = element_blank(),
+          panel.grid = element_blank(),
+          axis.title = element_blank(),
+          plot.margin = margin(0, 0, 0, 0, "pt")) +
+    labs(fill = "Days after transplant")
+)
+
+(sample_type_bar <- genus_abund %>% 
+  mutate(sample = factor(sample, levels = (sample_hclust_order), ordered = TRUE)) %>% 
+  ggplot(aes(sample, 1, fill = transplant_type)) +
+  geom_tile(color = "grey70") +
+  scale_fill_manual(values = c("#2083e6", "#f09f26", "#9a5ebd")) +
+    theme_minimal() +
+    theme(axis.ticks = element_blank(),
+          axis.text = element_blank(),
+          panel.grid = element_blank(),
+          axis.title = element_blank(),
+          plot.margin = margin(0, 0, 0, 0, "pt")) +
+    labs(fill = "Gut section")
+)
+
+
+(genus_abund_plt <- genus_abund %>% 
+  filter(Genus %in% most_variant_genera$Genus) %>% 
+  mutate(Genus = factor(Genus, levels = hclust_order, ordered = TRUE),
+         sample = factor(sample, levels = (sample_hclust_order), ordered = TRUE)) %>% 
+  ggplot(aes(sample, Genus,fill = percent_abund)) +
+  geom_tile(color = "grey70") +
+  #ggh4x::facet_nested(~plot_categories + gut_section,scales = "free_x") +
+  scale_fill_viridis_c(trans = "log2",na.value = "#ffffff",labels = scales::label_number()) +
+  #scale_fill_viridis_c(na.value = "#ffffff") +
+  ggh4x::scale_y_dendrogram(hclust = most_variant_genera_hclust) +
+  ggh4x::scale_x_dendrogram(hclust = sample_hclust) +
+  theme_bw() +
+    theme(axis.text.x = element_blank()) +
+    labs(fill = "% abundance",
+         x = "Samples")
+)
+
+genus_abund %>% 
+  filter(Genus %in% most_variant_genera$Genus) %>% 
+  group_by(Genus) %>% 
+  mutate(Genus = factor(Genus, levels = hclust_order, ordered = TRUE),
+         z_score = scale(percent_abund)) %>% 
+  ggplot(aes(sample, Genus,fill = z_score)) +
+  geom_tile(color = "grey70") +
+  #ggh4x::facet_nested(~plot_categories + gut_section,scales = "free_x") +
+  ggh4x::facet_nested(~ transplant_type + days_after_transplant + gut_section ,scales = "free_x") +
+  scale_fill_viridis_c(na.value = "#ffffff")
+  #scale_fill_viridis_c(trans = "log10",na.value = "#ffffff")
+  
+
+(genus_abund_plt_z <- genus_abund %>% 
+  filter(Genus %in% most_variant_genera$Genus) %>% 
+  group_by(Genus) %>% 
+  mutate(Genus = factor(Genus, levels = hclust_order, ordered = TRUE),
+         sample = factor(sample, levels = (sample_hclust_order), ordered = TRUE),
+         z_score = scale(percent_abund)) %>% 
+  ggplot(aes(sample, Genus,fill = z_score)) +
+  geom_tile(color = "grey70") +
+  #ggh4x::facet_nested(~plot_categories + gut_section,scales = "free_x") +
+  #scale_fill_viridis_c(trans = "log10",na.value = "#ffffff",labels = scales::label_number()) +
+  scale_fill_viridis_c(na.value = "#ffffff") +
+  ggh4x::scale_y_dendrogram(hclust = most_variant_genera_hclust) +
+  ggh4x::scale_x_dendrogram(hclust = sample_hclust) +
+  theme_bw() +
+    theme(axis.text.x = element_blank()) +
+    labs(fill = "Genus abundance\nz-score",
+         x = "Samples")
+)
+
+```
+
+```{r}
+(combined_plt_log_abund <- sample_section_bar / sample_day_bar / sample_type_bar / genus_abund_plt + plot_layout(guides = "collect",heights = c(0.1,0.1,0.1,3)) )
+
+ggsave("results/genera_highest_variance_heatmap.png",width = 5, height = 4, scale = 2)
+ggsave("results/genera_highest_variance_heatmap.pdf",width = 5, height = 4, scale = 2)
+ggsave("results/genera_highest_variance_heatmap.eps",width = 5, height = 4, scale = 2)
+
+(combined_plt_z_scores <- sample_section_bar / sample_day_bar / sample_type_bar / genus_abund_plt_z + plot_layout(guides = "collect",heights = c(0.1,0.1,0.1,2)) )
+
+ggsave("results/genera_highest_variance_heatmap_z-scores.png",width = 5, height = 4, scale = 2)
+ggsave("results/genera_highest_variance_heatmap_z-scores.pdf",width = 5, height = 4, scale = 2)
+ggsave("results/genera_highest_variance_heatmap_z-scores.eps",width = 5, height = 4, scale = 2)
+```
+
+
 
 # All sites
 ## Syngeneic vs allogeneic (all)
