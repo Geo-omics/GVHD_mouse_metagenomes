@@ -28,7 +28,8 @@ metabolite_info_pos <- read_excel("data/omics/metabolomics/EX01129_RP-POS_4BINNE
 metabolite_info_neg <- read_excel("data/omics/metabolomics/EX01129_RP-NEG_4BINNER+Named_20210818_173700_Bin_PP_Final[1].xlsx", 
     sheet = "DB Results") 
 
-metabolite_info <- bind_rows(metabolite_info_neg,metabolite_info_pos)
+metabolite_info <- bind_rows(metabolite_info_neg,metabolite_info_pos) %>% 
+  write_rds("data/metabolomics/metabolite_info_combined.rds")
 
 
 import_data <- read_tsv("data/import_log.tsv",col_names = FALSE) %>% 
@@ -108,7 +109,13 @@ metab_combined <- bind_rows(simp_metab_pos, simp_metab_neg) %>%
   left_join(metab_metadata %>% dplyr::select(researcher_sample_id, import_id)) %>%
   dplyr::select(-researcher_sample_id) %>%
   pivot_wider(names_from = "import_id", values_from = "value") %>% 
-  column_to_rownames("compound")
+  column_to_rownames("compound") %>% 
+  write_rds("data/metabolomics/combined.rds")
+
+metab_combined_long <- metab_combined %>% 
+  rownames_to_column("compound") %>% 
+  pivot_longer(-compound, names_to = "sample_id",values_to = "abund")
+
 
 metab_combined_norm_for_vegan <- metab_combined %>% 
   rownames_to_column("compound") %>% 
@@ -118,7 +125,8 @@ metab_combined_norm_for_vegan <- metab_combined %>%
     sample = str_replace(sample,"-","_")) %>% 
   pivot_wider(names_from = sample, values_from = abund) %>% 
   column_to_rownames("compound") %>% 
-  as.matrix()
+  as.matrix() %>% 
+  write_rds("data/metabolomics/combined_vegan.rds")
 
 abund_int_aldex <- round(metab_combined_norm_for_vegan)
 
@@ -448,13 +456,14 @@ library(ALDEx2)
 aldex_metadata <- metab_metadata %>% 
   #dplyr::rename(transplant_type = "Transplant type") %>% 
   filter(transplant_type %in% c("Allogeneic","Syngeneic"),
-         researcher_sample_id %in% colnames(abund_int_aldex)) %>% 
+         import_id %in% colnames(abund_int_aldex)) %>% 
    mutate(transplant_type = relevel(factor(transplant_type), "Syngeneic")) %>% 
-  column_to_rownames("researcher_sample_id")
+  column_to_rownames("import_id")
 
-aldex_abund_metab <- abund_int_aldex[,rownames(aldex_metadata)]
+aldex_abund_metab <- abund_int_aldex[,rownames(aldex_metadata)] %>% 
+  as.matrix()
 
-treatments <- aldex_metadata %>% pull("transplant_type")
+treatments <- aldex_metadata %>% pull("transplant_type") 
 
 aldex_out_metab <- aldex(aldex_abund_metab, treatments, mc.samples=100, test="t", effect=TRUE, include.sample.summary=FALSE, verbose=FALSE, denom = "all")
 
@@ -491,9 +500,9 @@ aldex_out_w_names <- read_tsv("results/metabolomics/differential_abundance_syn_v
 ```{r}
 mm <- model.matrix(~ transplant_type + gut_section + days_after_transplant, aldex_metadata)
 
-clr <- aldex.clr(aldex_abund_metab,mm,mc.samples = 10, useMC = T)
+clr_glm_metab <- aldex.clr(aldex_abund_metab,mm,mc.samples = 128, useMC = T)
 
-glm.test <- aldex.glm(clr, mm)
+glm.test_metab <- aldex.glm(clr_glm_metab, mm)
 ```
 
 

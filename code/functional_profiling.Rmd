@@ -1610,7 +1610,9 @@ kofamscan_res <- read_rds("results/bin_kofamscan.rds")
 
 ko_defs <- kofamscan_res %>% 
   dplyr::select(ko, ko_definition) %>% 
-  distinct()
+  distinct() %>% 
+  write_rds("results/ko_defs.rds")
+  
 
 for_ko_percent_abund <- coverm_tidy_wide %>% 
   dplyr::select(genome, sample, percent_abund)
