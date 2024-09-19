@@ -702,14 +702,15 @@ sample_tree <- vegan_abund %>%
 colors = c("#9a5ebd","#9dbfe0","#2083e6", "#dec8a6","#f09f26")
 
 ggtree::ggtree(sample_tree,layout='circular') %<+% (metadata %>% relocate(import_id)) +
-  geom_tiplab(aes(label = str_glue("{gut_section} {if_else(replicate != 'other', replicate, '')}"))) + 
+  geom_tiplab(aes(label = str_glue("{gut_section} {if_else(replicate != 'other', replicate, '')}")),offset = 7) + 
   expand_limits(x = 75) +
-  geom_tippoint(aes(color = plot_categories)) +
+  geom_tippoint(aes(color = plot_categories),size = 4) +
   scale_color_manual(values = colors) + 
-  labs(color = "Treatment group")
+  labs(color = "Treatment group") +
+  theme(plot.margin = margin(100,100,100,100))
 
-ggsave("results/community_distance_tree_circular.png", width = 4, height = 3, scale = 2.5)
-ggsave("results/community_distance_tree_circular.pdf", width = 4, height = 3, scale = 2.5)
+ggsave("results/community_distance_tree_circular.png", width = 4, height = 3, scale = 3)
+ggsave("results/community_distance_tree_circular.pdf", width = 4, height = 3, scale = 3)
 
 
 ggtree::ggtree(sample_tree) %<+% (metadata %>% relocate(import_id)) +
@@ -1065,18 +1066,103 @@ sample_hclust_order <- sample_hclust$labels[sample_hclust$order]
          x = "Samples")
 )
 
+str_wrap_factor <- function(x, ...) {
+  levels(x) <- str_wrap(levels(x), ...)
+  x
+}
+
 genus_abund %>% 
   filter(Genus %in% most_variant_genera$Genus) %>% 
   group_by(Genus) %>% 
   mutate(Genus = factor(Genus, levels = hclust_order, ordered = TRUE),
-         z_score = scale(percent_abund)) %>% 
-  ggplot(aes(sample, Genus,fill = z_score)) +
+         z_score = scale(percent_abund),
+         days_after_transplant = factor(str_glue("Day: {days_after_transplant}"), levels = c("Day: 7", "Day: 21", "Day: other"), ordered = TRUE)) %>% 
+  ggplot(aes(sample, Genus,fill = percent_abund)) +
+  geom_tile(color = "grey70") +
+  #ggh4x::facet_nested(~plot_categories + gut_section,scales = "free_x") +
+  ggh4x::facet_nested(~ days_after_transplant + transplant_type + str_wrap_factor(gut_section,5) ,scales = "free_x") +
+  #scale_fill_viridis_c(na.value = "#ffffff") +
+  ggh4x::scale_y_dendrogram(hclust = most_variant_genera_hclust) +
+  scale_fill_viridis_c(trans = "log2",na.value = "#ffffff",labels = scales::label_number(accuracy = 0.01)) +
+  theme_bw() +
+    theme(axis.text.x = element_blank(),
+          legend.position = "bottom") +
+    labs(fill = "% abundance",
+         x = "Samples")
+  
+ggsave("results/genera_highest_variance_heatmap_facets.png",width = 6.5, height = 4, scale = 2.5)
+ggsave("results/genera_highest_variance_heatmap_facets.pdf",width = 6.5, height = 4, scale = 2.5)
+ggsave("results/genera_highest_variance_heatmap_facets.eps",width = 6.5, height = 4, scale = 2.5)
+
+
+genus_abund %>% 
+  filter(Genus %in% most_variant_genera$Genus) %>% 
+  group_by(Genus) %>% 
+  mutate(Genus = factor(Genus, levels = hclust_order, ordered = TRUE),
+         z_score = scale(percent_abund),
+         days_after_transplant = factor(str_glue("Day: {days_after_transplant}"), levels = c("Day: 7", "Day: 21", "Day: other"), ordered = TRUE)) %>% 
+  ggplot(aes(sample, Genus,fill = percent_abund)) +
+  geom_tile(color = "grey70") +
+  #ggh4x::facet_nested(~plot_categories + gut_section,scales = "free_x") +
+  ggh4x::facet_nested(~ gut_section + days_after_transplant + transplant_type ,scales = "free_x") +
+  #scale_fill_viridis_c(na.value = "#ffffff") +
+  ggh4x::scale_y_dendrogram(hclust = most_variant_genera_hclust) +
+  scale_fill_viridis_c(trans = "log2",na.value = "#ffffff",labels = scales::label_number(accuracy = 0.01)) +
+  theme_bw() +
+    theme(axis.text.x = element_blank(),
+          legend.position = "bottom") +
+    labs(fill = "% abundance",
+         x = "Samples")
+  
+ggsave("results/genera_highest_variance_heatmap_facets2.png",width = 6.5, height = 4, scale = 2.5)
+ggsave("results/genera_highest_variance_heatmap_facets2.pdf",width = 6.5, height = 4, scale = 2.5)
+ggsave("results/genera_highest_variance_heatmap_facets2.eps",width = 6.5, height = 4, scale = 2.5)
+
+genus_abund %>% 
+  filter(Genus %in% most_variant_genera$Genus) %>% 
+  group_by(Genus) %>% 
+  mutate(Genus = factor(Genus, levels = hclust_order, ordered = TRUE),
+         z_score = scale(percent_abund),
+         days_after_transplant = factor(str_glue("Day: {days_after_transplant}"), levels = c("Day: 7", "Day: 21", "Day: other"), ordered = TRUE)) %>% 
+  ggplot(aes(sample, Genus,fill = percent_abund)) +
   geom_tile(color = "grey70") +
   #ggh4x::facet_nested(~plot_categories + gut_section,scales = "free_x") +
   ggh4x::facet_nested(~ transplant_type + days_after_transplant + gut_section ,scales = "free_x") +
-  scale_fill_viridis_c(na.value = "#ffffff")
-  #scale_fill_viridis_c(trans = "log10",na.value = "#ffffff")
+  #scale_fill_viridis_c(na.value = "#ffffff") +
+  ggh4x::scale_y_dendrogram(hclust = most_variant_genera_hclust) +
+  scale_fill_viridis_c(trans = "log2",na.value = "#ffffff",labels = scales::label_number(accuracy = 0.01)) +
+  theme_bw() +
+    theme(axis.text.x = element_blank(),
+          legend.position = "bottom") +
+    labs(fill = "% abundance",
+         x = "Samples")
   
+ggsave("results/genera_highest_variance_heatmap_facet3.png",width = 6.5, height = 4, scale = 2.5)
+ggsave("results/genera_highest_variance_heatmap_facets3.pdf",width = 6.5, height = 4, scale = 2.5)
+ggsave("results/genera_highest_variance_heatmap_facets3.eps",width = 6.5, height = 4, scale = 2.5)
+
+genus_abund %>% 
+  filter(Genus %in% most_variant_genera$Genus) %>% 
+  group_by(Genus) %>% 
+  mutate(Genus = factor(Genus, levels = hclust_order, ordered = TRUE),
+         z_score = scale(percent_abund),
+         days_after_transplant = factor(str_glue("Day: {days_after_transplant}"), levels = c("Day: 7", "Day: 21", "Day: other"), ordered = TRUE)) %>% 
+  ggplot(aes(sample, Genus,fill = percent_abund)) +
+  geom_tile(color = "grey70") +
+  #ggh4x::facet_nested(~plot_categories + gut_section,scales = "free_x") +
+  ggh4x::facet_nested(~ gut_section + transplant_type + days_after_transplant ,scales = "free_x") +
+  #scale_fill_viridis_c(na.value = "#ffffff") +
+  ggh4x::scale_y_dendrogram(hclust = most_variant_genera_hclust) +
+  scale_fill_viridis_c(trans = "log2",na.value = "#ffffff",labels = scales::label_number(accuracy = 0.01)) +
+  theme_bw() +
+    theme(axis.text.x = element_blank(),
+          legend.position = "bottom") +
+    labs(fill = "% abundance",
+         x = "Samples")
+  
+ggsave("results/genera_highest_variance_heatmap_facet4.png",width = 6.5, height = 4, scale = 2.5)
+ggsave("results/genera_highest_variance_heatmap_facets4.pdf",width = 6.5, height = 4, scale = 2.5)
+ggsave("results/genera_highest_variance_heatmap_facets4.eps",width = 6.5, height = 4, scale = 2.5)
 
 (genus_abund_plt_z <- genus_abund %>% 
   filter(Genus %in% most_variant_genera$Genus) %>% 

@@ -201,31 +201,36 @@ bc_dists_df <- bc_dists %>%
   rownames_to_column("s1") %>% 
   pivot_longer(-s1, values_to = "dist", names_to = "s2") %>% 
   left_join(metadata_2018_16S %>% 
-              select(sample, sample_type, gut_section, transplant_type) %>% 
+              select(sample, sample_type, gut_section, transplant_type, days_after_transplant) %>% 
               bind_rows(metag_metadata %>% 
-                          select(sample, gut_section, transplant_type) %>%  
+                          select(sample, gut_section, transplant_type, days_after_transplant) %>%  
                           mutate(sample_type = "metagenome")) %>% 
-              dplyr::rename(s1 = "sample", s1_gut_section = "gut_section", s1_transplant_type = "transplant_type", s1_sample_type = "sample_type")) %>% 
+              dplyr::rename(s1 = "sample", s1_gut_section = "gut_section", s1_transplant_type = "transplant_type", s1_sample_type = "sample_type", s1_days = "days_after_transplant")) %>% 
   left_join(metadata_2018_16S %>% 
-              select(sample, sample_type, gut_section, transplant_type) %>% 
+              select(sample, sample_type, gut_section, transplant_type, days_after_transplant) %>% 
               bind_rows(metag_metadata %>% 
-                          select(sample, gut_section, transplant_type) %>%  
+                          select(sample, gut_section, transplant_type, days_after_transplant) %>%  
                           mutate(sample_type = "metagenome")) %>% 
-              dplyr::rename(s2 = "sample", s2_gut_section = "gut_section", s2_transplant_type = "transplant_type", s2_sample_type = "sample_type"))
+              dplyr::rename(s2 = "sample", s2_gut_section = "gut_section", s2_transplant_type = "transplant_type", s2_sample_type = "sample_type", s2_days = "days_after_transplant"))
 
-gut_sections <- c("Terminal ileum", "Cecum", "Transverse Colon", "Descending Colon")
+gut_sections <- c("Terminal ileum", "Cecum", "Transverse Colon", "Descending Colon", "Feces")
 
+# Only compare within groups
 bc_dists_df %>% 
   filter(s1_sample_type == "Amplicon",
-         s2_sample_type != "Amplicon") %>% 
-  mutate(s1_transplant_type = case_when(s1_transplant_type == "Allogeneic" ~ "Allogeneic feces",
-                                    s1_transplant_type == "Syngeneic" ~ "Syngeneic feces"),
+         s1 != s2,
+         s1_transplant_type == s2_transplant_type,
+         #s2_sample_type != "Amplicon" |
+         ) %>% 
+  mutate(s1_transplant_type = case_when(s1_transplant_type == "Allogeneic" ~ "Similarity to allogeneic fecal\ncommunities from Seike et al. 2023",
+                                    s1_transplant_type == "Syngeneic" ~ "Similarity to syngeneic fecal\ncommunities from Seike et al. 2023"),
          s2_gut_section = factor(s2_gut_section, levels = gut_sections),
-         s2_transplant_type = factor(s2_transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic"))) %>% 
+         s2_transplant_type = factor(s2_transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic")),
+         study = if_else(s2_sample_type == "Amplicon", "Seike et\nal. 2023", "Present study")) %>% 
   ggplot(aes(s2_gut_section, 1- dist, fill = s2_transplant_type)) + 
   geom_boxplot() +
-  facet_wrap(~s1_transplant_type) +
-  scale_fill_manual(values = c("#9a5ebd","#2083e6", "#f09f26")) +
+  ggh4x::facet_nested(~s1_transplant_type + study,scales = "free_x",space = "free_x") +
+  scale_fill_manual(values = c("#2083e6", "#f09f26")) +
   theme_bw() +
   scale_x_discrete(guide = guide_axis(angle = -25)) +
   labs(x = "Gut section", 
@@ -235,6 +240,82 @@ bc_dists_df %>%
 ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity.png", width = 4, height =2, scale = 1.75)
 ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity.pdf", width = 4, height =2, scale = 1.75)
 ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity.eps", width = 4, height =2, scale = 1.75)
+
+# All metagenome samples compared to Keisuke's data
+bc_dists_df %>% 
+  filter(s1_sample_type == "Amplicon",
+         s1 != s2,
+         #s2_sample_type != "Amplicon" |
+         ) %>% 
+  mutate(s1_transplant_type = case_when(s1_transplant_type == "Allogeneic" ~ "Similarity to allogeneic fecal\ncommunities from Seike et al. 2023",
+                                    s1_transplant_type == "Syngeneic" ~ "Similarity to syngeneic fecal\ncommunities from Seike et al. 2023"),
+         s2_gut_section = factor(s2_gut_section, levels = gut_sections),
+         s2_transplant_type = factor(s2_transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic")),
+         study = if_else(s2_sample_type == "Amplicon", "Seike et\nal. 2023", "Present study")) %>% 
+  ggplot(aes(s2_gut_section, 1- dist, fill = s2_transplant_type)) + 
+  geom_boxplot() +
+  ggh4x::facet_nested(~s1_transplant_type + study,scales = "free_x",space = "free_x") +
+  scale_fill_manual(values = c("#9a5ebd","#2083e6", "#f09f26")) +
+  theme_bw() +
+  scale_x_discrete(guide = guide_axis(angle = -25)) +
+  labs(x = "Gut section", 
+       y = "Similarity [1 - Bray Curtis Dissimilarity]",
+       fill = NULL)
+
+ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity_ALL.png", width = 4, height =2, scale = 1.75)
+ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity_ALL.pdf", width = 4, height =2, scale = 1.75)
+ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity_ALL.eps", width = 4, height =2, scale = 1.75)
+
+# Day 21 metagenomes only
+bc_dists_df %>% 
+  filter(s1_sample_type == "Amplicon",
+         s1 != s2,
+         s2_days %in% c(14,21)
+         #s2_sample_type != "Amplicon" |
+         ) %>% 
+  mutate(s1_transplant_type = case_when(s1_transplant_type == "Allogeneic" ~ "Similarity to allogeneic fecal\ncommunities from Seike et al. 2023",
+                                    s1_transplant_type == "Syngeneic" ~ "Similarity to syngeneic fecal\ncommunities from Seike et al. 2023"),
+         s2_gut_section = factor(s2_gut_section, levels = gut_sections),
+         s2_transplant_type = factor(s2_transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic")),
+         study = if_else(s2_sample_type == "Amplicon", "Seike et\nal. 2023", "Present study")) %>% 
+  ggplot(aes(s2_gut_section, 1- dist, fill = s2_transplant_type)) + 
+  geom_boxplot() +
+  ggh4x::facet_nested(~s1_transplant_type + study,scales = "free_x",space = "free_x") +
+  scale_fill_manual(values = c("#2083e6", "#f09f26")) +
+  theme_bw() +
+  scale_x_discrete(guide = guide_axis(angle = -25)) +
+  labs(x = "Gut section", 
+       y = "Similarity [1 - Bray Curtis Dissimilarity]",
+       fill = NULL)
+
+ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity_day21.png", width = 4, height =2, scale = 1.75)
+ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity_day21.pdf", width = 4, height =2, scale = 1.75)
+ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity_day21.eps", width = 4, height =2, scale = 1.75)
+
+# Broken out by day
+bc_dists_df %>% 
+  filter(s1_sample_type == "Amplicon",
+         s1 != s2,
+         #s2_sample_type != "Amplicon" |
+         ) %>% 
+  mutate(s1_transplant_type = case_when(s1_transplant_type == "Allogeneic" ~ "Similarity to allogeneic fecal\ncommunities from Seike et al. 2023",
+                                    s1_transplant_type == "Syngeneic" ~ "Similarity to syngeneic fecal\ncommunities from Seike et al. 2023"),
+         s2_gut_section = factor(s2_gut_section, levels = gut_sections),
+         s2_transplant_type = factor(s2_transplant_type, levels = c("Naive", "Syngeneic", "Allogeneic")),
+         study = if_else(s2_sample_type == "Amplicon", "Seike et\nal. 2023", "Present study")) %>% 
+  ggplot(aes(s2_gut_section, 1- dist, fill = s2_transplant_type)) + 
+  geom_boxplot() +
+  ggh4x::facet_nested(~s1_transplant_type + study + str_glue("Day: {s2_days}"),scales = "free_x",space = "free_x") +
+  scale_fill_manual(values = c("#9a5ebd","#2083e6", "#f09f26")) +
+  theme_bw() +
+  scale_x_discrete(guide = guide_axis(angle = -25)) +
+  labs(x = "Gut section", 
+       y = "Similarity [1 - Bray Curtis Dissimilarity]",
+       fill = NULL)
+
+ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity_ALL_by_days.png", width = 6, height =2, scale = 2.25)
+ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity_ALL_by_days.pdf", width = 6, height =2, scale = 2.25)
+ggsave("results/16S-feces_vs_metagenome_descending_colon-similarity_ALL_by_days.eps", width = 6, height =2, scale = 2.25)
 
 ```
 

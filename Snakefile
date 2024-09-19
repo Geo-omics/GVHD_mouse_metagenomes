@@ -3265,13 +3265,16 @@ rule pupy_primers:
         non_target_cds = "data/pupy_primers/{genus}/non-target",
         align_out = "data/pupy_primers/{genus}/align_out/ResultDB.tsv"        
     output:
-        primers_out = directory("data/pupy_primers/{genus}/primers")
+        #primers_out = directory("data/pupy_primers/{genus}/primers"),
+        primers_out = directory("/scratch/kiledal/pupy_primers/{genus}/primers")
     conda: "config/conda_yaml/pupy.yaml"
     log: "logs/pupy_primers/{genus}.log"
     benchmark: "benchmarks/pupy_primers/{genus}.txt"
-    resources: cpus = 24, time_min=20000, mem_mb = 100000
+    resources: cpus = 16, time_min=20000, mem_mb = 400000
     shell:
-        """        
+        """ 
+        export MMSEQS2_NUM_THREADS={resources.cpus}
+
         puppy-primers \
             -p group \
             -pr {input.target_cds} \

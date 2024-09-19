@@ -100,16 +100,26 @@ ko_defs <- read_rds("results/ko_defs.rds")
 ## Prep & merge data
 
 ```{r}
+# mofa_tax_species <- rel_abund_long %>% 
+#   filter(!is.na(Class),
+#          !is.na(Species)) %>% 
+#   mutate(taxonomy = str_glue("{Domain}; {Phylum}; {Class}; {Order}; {Family}; {Genus}; {Species}")) %>% 
+#   group_by(sample, Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy) %>% 
+#   summarise(rel_abund = sum(rel_abund)) %>% 
+#   ungroup() %>% 
+#   select(sample, feature = "taxonomy", value = "rel_abund") %>% 
+#   filter(value > 0) %>% 
+#   mutate(value = log(value),
+#          view = "tax_abund",
+#          group = NA)
+
 mofa_tax <- rel_abund_long %>% 
-  filter(!is.na(Class),
-         !is.na(Species)) %>% 
-  mutate(taxonomy = str_glue("{Domain}; {Phylum}; {Class}; {Order}; {Family}; {Genus}; {Species}")) %>% 
-  group_by(sample, Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy) %>% 
-  summarise(rel_abund = sum(rel_abund)) %>% 
-  ungroup() %>% 
-  select(sample, feature = "taxonomy", value = "rel_abund") %>% 
+  select(sample, feature = "taxonomy_id", value = "rel_abund") %>% 
   filter(value > 0) %>% 
-  mutate(value = log(value),
+  group_by(sample) %>% 
+  mutate(
+         #value = log(value),
+         value = compositions::clr(value), # CLR transform abundance data
          view = "tax_abund",
          group = NA)
 
@@ -118,36 +128,47 @@ mofa_tax %>% ggplot(aes(value)) +
   geom_histogram() #+
   #scale_x_log10()
 
-mofa_metabolites <- named_metabolite_abund %>%
+mofa_metabolites <- metabolite_abund %>%
   rownames_to_column("feature") %>%
   pivot_longer(-feature,names_to = "sample", values_to = "value") %>%
   filter(value > 0) %>%
-  mutate(value = log(value),
+  group_by(sample) %>% 
+  mutate(value = value / sum(value)) %>% # sample normalization
+  group_by(feature) %>% 
+  mutate(
+    value = scale(value),
   group = NA,
   view = "metabolites")
 
 # Look at distribution of metabolite abund data
 mofa_metabolites %>% ggplot(aes(value)) +
-  geom_histogram() #+
+  geom_histogram() 
   #scale_x_log10()
   
 # KEGG KO abund
 
-ko_names <- 
+#ko_names <- 
 
 mofa_ko <- ko_abund %>% 
   select(sample, feature = "ko", value = "ko_abund") %>% 
+  group_by(sample) %>% 
   mutate(group = NA,
          view = "ko_abund",
-         value = log(value)) %>% 
+         #value = log10(value)
+         #value = scale(value),
+         value = compositions::clr(value), # CLR transform abundance data
+         ) %>% 
   filter(value > 0)
+
+mofa_ko %>% ggplot(aes(value)) +
+  geom_histogram()
   
 mofa_combined <- bind_rows(mofa_tax, 
                            mofa_metabolites, 
                            mofa_ko
                            ) %>% 
-  select(-group) #%>%
-  #left_join(metadata %>% select(sample, group = "replicate"))
+  select(-group) %>%
+  left_join(metadata %>% select(sample, group = "replicate"))
 
 ```
 
@@ -167,7 +188,8 @@ mofa <- prepare_mofa(mofa_obj, model_options = model_opts)
 
 mofa_trained <- run_mofa(mofa,use_basilisk = TRUE)
 
-samples_metadata(mofa_trained) <- metadata
+samples_metadata(mofa_trained) <- metadata %>% 
+  mutate(group = replicate)
 
 fs::dir_create("data/mofa")
 write_rds(mofa_trained,"data/mofa/mofa_trained.rds")
@@ -348,18 +370,31 @@ plot_data_scatter(mofa_trained,
 ## MEFEISTO
 
 ```{r}
-mofa_obj <- create_mofa_from_df(mofa_combined)
 
-samples_metadata(mofa_obj) <- metadata %>% 
-  #dplyr::rename(group = "replicate") %>% 
+mofa_metadata <- metadata %>% 
+  dplyr::rename(group = "replicate") %>% 
   mutate(numeric_gut_section = as.numeric(gut_section),
          numeric_days_since_transplant = as.numeric(days_after_transplant),
-         numeric_days_since_transplant = if_else(plot_categories == "Naive", 0, numeric_days_since_transplant))
+         numeric_days_since_transplant = if_else(plot_categories == "Naive", 0, numeric_days_since_transplant)) #%>% 
+  #filter(transplant_type != "Naive")
+
+
+mofa_obj <- create_mofa_from_df(mofa_combined %>% filter(sample %in% mofa_metadata$sample))
+samples_metadata(mofa_obj) <- mofa_metadata
+
 
 mofa_obj_spatial <- set_covariates(mofa_obj,
                                    covariates =  c("numeric_gut_section","numeric_days_since_transplant"))
+                                   #covariates =  c("numeric_days_since_transplant"))
+
+
 
 plot_data_overview(mofa_obj_spatial)
+
+ggsave("results/mefiesto/data_overview.png", width = 3, height = 3, scale =1.5)
+ggsave("results/mefiesto/data_overview.pdf", width = 3, height = 3, scale =1.5)
+ggsave("results/mefiesto/data_overview.eps", width = 3, height = 3, scale =1.5)
+
 ```
 
 ```{r}
@@ -368,14 +403,18 @@ data_opts <- get_default_data_options(mofa_obj_spatial)
 
 
 model_opts_spatial <- get_default_model_options(mofa_obj_spatial)
-model_opts_spatial$num_factors <- 15
+model_opts_spatial$num_factors <- 10
 
 mefisto_opts <- get_default_mefisto_options(mofa_obj_spatial)
+
+mefisto_training_opts <- get_default_training_options(mofa_obj_spatial)
+mefisto_training_opts$convergence_mode <- "slow"
 
 mofa_spatial <- prepare_mofa(mofa_obj_spatial, 
                              model_options = model_opts_spatial,
                              data_options = data_opts,
-                             mefisto_options = mefisto_opts,)
+                             mefisto_options = mefisto_opts,
+                             training_options = mefisto_training_opts)
 
 mofa_spatial_trained <- run_mofa(mofa_spatial,use_basilisk = TRUE)
 
@@ -386,15 +425,26 @@ write_rds(mofa_spatial_trained,"data/mofa/mofa_spatial_trained.rds")
 ```
 
 ```{r}
-plot_variance_explained(mofa_spatial_trained, plot_total = T)[[2]]
+plot_variance_explained(mofa_spatial_trained, plot_total = T)[[2]] +
+  scale_x_discrete(guide = guide_axis(angle = -45)) +
+  theme(plot.margin = margin(2, 30, 2, 2))
+
+ggsave("results/mefiesto/view_var_explained.png", width = 4, height = 3, scale =1.5)
+ggsave("results/mefiesto/view_var_explained.pdf", width = 4, height = 3, scale =1.5)
+ggsave("results/mefiesto/view_var_explained.eps", width = 4, height = 3, scale =1.5)
 ```
 
 ```{r}
-plot_variance_explained(mofa_spatial_trained, max_r2=15)
+plot_variance_explained(mofa_spatial_trained, max_r2=15) +
+  scale_x_discrete(guide = guide_axis(angle = -45)) 
+
+ggsave("results/mefiesto/factor_view_var_explained.png", width = 4, height = 3, scale =1.5)
+ggsave("results/mefiesto/factor_view_var_explained.pdf", width = 4, height = 3, scale =1.5)
+ggsave("results/mefiesto/favtor_view_var_explained.eps", width = 4, height = 3, scale =1.5)
 ```
 
 ```{r}
-r <- plot_factor_cor(mofa_spatial_trained)
+plot_factor_cor(mofa_spatial_trained)
 ```
 
 From [this](https://raw.githack.com/bioFAM/MEFISTO_tutorials/master/MEFISTO_spatial.html) tutorial:
@@ -407,25 +457,35 @@ get_scales(mofa_spatial_trained)
 
 ```{r}
 plot_factors_vs_cov(mofa_spatial_trained) 
+
+ggsave("results/mefiesto/factor_vs_covariates.png", width = 3.5, height = 3, scale =1.5)
+ggsave("results/mefiesto/factor_vs_covariates.pdf", width = 3.5, height = 3, scale =1.5)
+ggsave("results/mefiesto/factor_vs_covariates.eps", width = 3.5, height = 3, scale =1.5)
 ```
 
 
 
 ```{r}
 
-factor_pair <- c(1,5)
+factor_pair <- c(1,2)
 
 
 MOFA2::plot_factors(mofa_spatial_trained, 
   factors = factor_pair, 
   color_by = "plot_categories",
-  # shape_by = "gut_section",
+   shape_by = "gut_section",
   #color_by = "gut_section",
   #color_by = "days_after_transplant",
   #shape_by = "plot_categories",
   dot_size = 4
-) #+ scale_fill_manual(values=category.colors)
+) +
+  labs(color = NULL,
+       shape = NULL,
+       fill = NULL)
 
+ggsave("results/mefiesto/factor1_vs_factor2.png", width = 4, height = 3, scale =1.25)
+ggsave("results/mefiesto/factor1_vs_factor2.pdf", width = 4, height = 3, scale =1.25)
+ggsave("results/mefiesto/factor1_vs_factor2.eps", width = 4, height = 3, scale =1)
 
 MOFA2::plot_factors(mofa_spatial_trained, 
   factors = factor_pair, 
@@ -436,6 +496,7 @@ MOFA2::plot_factors(mofa_spatial_trained,
   #shape_by = "plot_categories",
   dot_size = 4
 ) #+ scale_fill_manual(values=category.colors)
+
 ```
 
 ```{r}
@@ -450,7 +511,7 @@ plot_factor_box <- function(fact_num, color_param){
   dot_size = 4,
   dodge = TRUE,
   stroke = 0.4,
-  add_violin = T,
+  add_violin = F,
   add_boxplot = T
 ) +
   #scale_fill_manual(values=category.colors) +
@@ -460,6 +521,10 @@ plot_factor_box <- function(fact_num, color_param){
   ))
   
   print(plt)
+  
+  ggsave(str_glue("results/mefiesto/per_factor/{fact_num}_{color_param}.png"), width = 4, height = 3, scale =1.25)
+  ggsave(str_glue("results/mefiesto/per_factor/{fact_num}_{color_param}.pdf"), width = 4, height = 3, scale =1.25)
+  ggsave(str_glue("results/mefiesto/per_factor/{fact_num}_{color_param}.eps"), width = 4, height = 3, scale =1)
 }
 
 walk2(factors, "plot_categories", .f = plot_factor_box)
@@ -489,10 +554,14 @@ plot_weights_fn <- function(mofa, factor=1, view=1, nfeatures=10) {
 
 
 ```{r}
-factor1_weights_spatial <- get_weights(mofa_spatial_trained,
-                               factors = 1,
+factor2_weights_spatial <- get_weights(mofa_spatial_trained,
+                               factors = 2,
                                as.data.frame = TRUE) %>% 
+  group_by(view) %>% 
+  mutate(rank = rank(value)) %>% 
+  arrange(desc(value)) %>% 
   left_join(metabolite_info %>% 
+              filter(`Match Replicate` == 1) %>% 
               select(feature = "Feature Name or Formula", 
                      compound_name = "Compound Name",
                      metab_super_class = "super_class",
@@ -501,55 +570,126 @@ factor1_weights_spatial <- get_weights(mofa_spatial_trained,
               mutate(view = "metabolites") %>% 
               distinct()
             ) %>% 
-  # left_join(rel_abund_long %>% 
-  #             select(feature = "taxonomy_id", 
-  #                   Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy) %>% 
-  #             mutate(view = "tax_abund") %>% 
-  #             distinct()
-  #           ) %>% 
+  left_join(rel_abund_long %>%
+              select(feature = "taxonomy_id",
+                    Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy) %>%
+              mutate(view = "tax_abund") %>%
+              distinct()
+            ) %>%
   left_join(ko_defs %>% 
               select(feature = "ko", 
                     ko_definition) %>% 
               mutate(view = "ko_abund") %>% 
               distinct()
-            )
+            ) %>% 
+  write_tsv("results/mefiesto/factor_2_weights.tsv")
 
 
-factor8_weights_spatial <- get_weights(mofa_spatial_trained,
-                               factors = 8,
-                               as.data.frame = TRUE) %>% 
-  left_join(metabolite_info %>% 
-              select(feature = "Feature Name or Formula", 
-                     compound_name = "Compound Name",
-                     metab_super_class = "super_class",
-                     metab_main_class = "main_class",
-                     metab_sub_class = "sub_class") %>% 
-              mutate(view = "metabolites") %>% 
-              distinct()
-            ) %>% 
-  left_join(rel_abund_long %>% 
-              select(feature = "taxonomy_id", 
-                    Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy) %>% 
-              mutate(view = "tax_abund") %>% 
-              distinct()
-            ) %>% 
-  left_join(ko_defs %>% 
-              select(feature = "ko", 
-                    ko_definition) %>% 
-              mutate(view = "ko_abund") %>% 
-              distinct()
-            )
+factor2_weights_spatial %>% 
+  filter(view == "tax_abund") %>% 
+  ggplot(aes(value, rank)) +
+  geom_point() +
+  theme_bw() +
+  geom_point(data = . %>% slice_max(order_by  = value, n = 10),
+             color = "red") + 
+  ggrepel::geom_label_repel(data = . %>% filter(!is.na(Genus)) %>% slice_max(order_by  = value, n = 10),
+             color = "red", aes(label = str_glue("{Family}, {Genus}")),nudge_y = -1000, size = 2 )  +
+  geom_point(data = . %>% slice_min(order_by  = value, n = 10),
+             color = "red") +
+  ggrepel::geom_label_repel(data = . %>% filter(!is.na(Genus)) %>%  slice_min(order_by  = value, n = 10),
+             color = "red", aes(label = str_glue("{Family}, {Genus}")),nudge_y = 1000, size = 2 )  +
+  labs(x = "Factor 2 Weight",
+       y = "Rank")
+
+ggsave("results/mefiesto/factor2_tax_abund.png", width = 5, height = 3, scale =1.25)
+ggsave("results/mefiesto/factor2_tax_abund.pdf", width = 5, height = 3, scale =1.25)
+ggsave("results/mefiesto/factor2_tax_abund.eps", width = 5, height = 3, scale =1)
+
+
+metabolite_highlights_left <- c("Phenyllactic acid","Sphinganine")
+
+metabolite_highlights_right <- c("Azelaic acid")
+
+factor2_weights_spatial %>% 
+  filter(view == "metabolites"
+         ) %>% 
+  mutate(feature = case_when(feature == "C9H16O4_Idx-415" ~"Azelaic acid",
+                             .default = feature)) %>% 
+  ggplot(aes(value, rank)) +
+  geom_point(color = "grey70") +
+  theme_bw() +
+  geom_point(data = . %>% slice_max(order_by  = value, n = 10),
+             color = "red") + 
+  ggrepel::geom_label_repel(data = . %>% filter(!is.na(compound_name)) %>% slice_max(order_by  = value, n = 5),
+             color = "red", aes(label = str_glue("{compound_name}")),nudge_y = -5000,size = 3)  +
+  ggrepel::geom_label_repel(data = . %>% filter(feature %in% metabolite_highlights_left ), 
+             color = "blue", aes(label = feature),nudge_y = -1000,nudge_x = -.3, size = 3)  +
+  ggrepel::geom_label_repel(data = . %>% filter(feature %in% metabolite_highlights_right), 
+             color = "blue", aes(label = feature),nudge_y = -1000,nudge_x = .3, size = 3)  +
+  geom_point(data = . %>% filter(feature %in% union.Vector(metabolite_highlights_left, metabolite_highlights_right)), color = "blue")  +
+  geom_point(data = . %>% slice_min(order_by  = value, n = 10),
+             color = "red", size = 3) +
+  ggrepel::geom_label_repel(data = . %>% filter(!is.na(compound_name)) %>% slice_min(order_by  = value, n = 5), 
+             color = "red", aes(label = str_glue("{compound_name}")), nudge_y = 3000, size = 3) +
+  labs(x = "Factor 2 Weight",
+       y = "Rank")
+
+ggsave("results/mefiesto/factor2_metabolites.png", width = 5, height = 3, scale =1.25)
+ggsave("results/mefiesto/factor2_metabolites.pdf", width = 5, height = 3, scale =1.25)
+ggsave("results/mefiesto/factor2_metabolites.eps", width = 5, height = 3, scale =1)
+
+
+factor2_weights_spatial %>% 
+  filter(view == "metabolites",
+         ) %>% 
+  ggplot(aes(value, rank)) +
+  geom_point(color = "grey70") +
+  theme_bw() +
+  geom_point(data = . %>% filter(metab_main_class == "Bile acids"),
+             color = "red") + 
+  labs(x = "Factor 2 Weight",
+       y = "Rank")
+
+
+factor2_weights_spatial %>% 
+  filter(view == "ko_abund",
+         ) %>% 
+  ggplot(aes(value, rank)) +
+  geom_point(color = "grey70") +
+  theme_bw() +
+  geom_point(data = . %>% slice_max(order_by  = value, n = 10),
+             color = "red") + 
+  ggrepel::geom_label_repel(data = . %>% filter(!is.na(ko_definition)) %>% slice_max(order_by  = value, n = 10),
+             color = "red", aes(label = str_glue("{ko_definition}")),nudge_y = -4000,size = 1)  +
+  geom_point(data = . %>% slice_min(order_by  = value, n = 10),
+             color = "red", size = 3) +
+  ggrepel::geom_label_repel(data = . %>% filter(!is.na(ko_definition)) %>% slice_min(order_by  = value, n = 10), 
+             color = "red", aes(label = str_glue("{ko_definition}")), nudge_y = 4000, size = 1) +
+  labs(x = "Factor 2 Weight",
+       y = "Rank")
+
+ggsave("results/mefiesto/factor2_KEGG.png", width = 5, height = 3, scale =1.25)
+ggsave("results/mefiesto/factor2_KEGG.pdf", width = 5, height = 3, scale =1.25)
+ggsave("results/mefiesto/factor2_KEGG.eps", width = 5, height = 3, scale =1)
+
+
 ```
 
 
 ```{r}
-plot_weights_fn(mofa_spatial_trained, factor=1, view="tax_abund", nfeatures=8)
-plot_weights_fn(mofa_spatial_trained, factor=1, view="metabolites", nfeatures=8)
+plot_weights_fn(mofa_spatial_trained, factor=2, view="tax_abund", nfeatures=8)
+plot_weights_fn(mofa_spatial_trained, factor=2, view="metabolites", nfeatures=8)
 
 
 plot_weights_fn(mofa_spatial_trained, factor=5, view="tax_abund", nfeatures=8)
 plot_weights_fn(mofa_spatial_trained, factor=5, view="metabolites", nfeatures=20)
 ```
+
+```{r}
+weights <- get_weights(mofa_spatial_trained,factors = 7,views = "metabolites") %>% 
+  data.frame(weight = .)
+```
+
 
 ```{r}
 plot_data_heatmap(mofa_trained, 

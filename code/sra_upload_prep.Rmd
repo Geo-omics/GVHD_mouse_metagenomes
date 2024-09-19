@@ -1,0 +1,60 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = here::here("~/GVHD"))
+library(tidyverse)
+library(googlesheets4)
+library(googledrive)
+
+conflicted::conflicts_prefer(dplyr::select(), dplyr::rename(), dplyr::filter(), dplyr::lag())
+```
+
+# Upload reads to SRA
+
+Import sample metadata
+```{r}
+source("code/funcs.R")
+
+metadata <- read_metaG_metadata()
+```
+
+
+## Link reads in single directory, neatly named for upload
+```{r}
+raw_read_paths <- Sys.glob("data/omics/metagenomes/*/reads/raw_*.fastq.gz") %>% 
+  data.frame(path = .) %>% 
+  unglue::unglue_unnest(path, "data/omics/metagenomes/{import_id}/reads/raw_{dir}_reads.fastq.gz",remove = FALSE) %>% 
+  left_join(metadata)
+
+link_path_df <- raw_read_paths %>% 
+  mutate(link_path = str_glue("data/sra_upload/{researcher_sample_id}_{dir}.fastq.gz"),
+         link_reference_path = str_glue("../../{path}"))
+
+fs::dir_create("data/sra_upload")
+fs::link_delete(link_path_df$link_path)
+fs::link_create(link_path_df$link_reference_path, link_path_df$link_path)
+```
+
+Export data for filling out submission table
+```{r}
+sra_upload_table <- link_path_df %>% 
+  select(-any_of(c("link_path", "link_reference_path", "dir", "path"))) %>% 
+  distinct() %>% 
+  mutate(fwd_read_name = str_glue("{researcher_sample_id}_fwd.fastq.gz"),
+         rev_read_name = str_glue("{researcher_sample_id}_rev.fastq.gz"),
+         title = case_when(transplant_type != "naive" ~ str_glue("Mouse {gut_section} metagenome, {days_after_transplant} days post {transplant_type} BMT, replicate {replicate}"),
+                                 transplant_type == "naive" ~ str_glue("Mouse {gut_section} metagenome, replicate {replicate}")),
+         description = case_when(transplant_type != "naive" ~ str_glue("Metagenome from mouse {gut_section} contents collected {days_after_transplant} days after {transplant_type} BMT, replicate {replicate}. DNA was extracted from contents of multiple co-housed mice. Samples also contain a DNA spike-in (0.05% of total DNA) of ATCC #MSA-1014"),
+                                 transplant_type == "naive" ~ str_glue("Metagenome from mouse {gut_section} contents, replicate {replicate}. DNA was extracted from contents of multiple co-housed mice. Samples also contain a DNA spike-in (0.05% of total DNA) of ATCC #MSA-1014")),
+         organism_type = str_glue("mouse {tolower(gut_section)} metagenome")) %>% 
+  write_tsv("data/sample_data/sra_upload.tsv")
+
+
+
+```
+
+
+
