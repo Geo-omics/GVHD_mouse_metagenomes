@@ -4395,6 +4395,63 @@ ggsave("results/individual_taxa_plots/combined_taxa_w_stats.svg", width = 4, hei
 ```
 
 
+## Genus with biggest + day effect plots
+```{r}
+increasing_genera <- glm_res_w_tax_genus %>% 
+  filter(`days_after_transplant.L:pval` < 0.05) %>% 
+  top_n(25, `days_after_transplant.L:Est`) %>% 
+  arrange(desc(`days_after_transplant.L:Est`)) %>% 
+  mutate(rank = row_number())
+
+
+rel_abund_long_genus <- rel_abund_long %>% 
+  mutate(taxonomy_id = str_glue("d__{Domain};p__{Phylum};c__{Class};o__{Order};f__{Family};g__{Genus}")) %>% 
+  filter(taxonomy_id %in% increasing_genera$taxonomy_id) %>% 
+  left_join(metadata)
+
+
+genus_id = "d__Bacteria;p__Firmicutes_A;c__Clostridia;o__Peptostreptococcales;f__Anaerovoracaceae;g__RGIG7444"
+
+plot_increasing_genus <- function(genus_id){
+
+  colors = c("#9a5ebd","#9dbfe0","#2083e6", "#dec8a6","#f09f26")
+
+  current_phylum <- rel_abund_long_genus %>% 
+    filter(taxonomy_id == genus_id) %>% 
+    pull("Phylum") %>% 
+    unique()
+  
+  current_genus <- rel_abund_long_genus %>% 
+    filter(taxonomy_id == genus_id) %>% 
+    pull("Genus") %>% 
+    unique()
+
+  rel_abund_long_genus %>% 
+    filter(taxonomy_id == genus_id) %>% 
+    ggplot(aes(1, rel_abund, fill = plot_categories)) +
+    geom_boxplot(outliers = FALSE) +
+    theme_bw() +
+    theme(axis.ticks.x = element_blank(),
+          axis.text.x = element_blank()) + 
+    scale_fill_manual(values = colors) +
+    facet_grid(~gut_section, scales = "free_x", labeller = labeller(gut_section = label_wrap_gen(5))) + 
+    scale_y_log10() +
+    labs(x = NULL,
+         y = "% abundance (log10)", 
+         fill = NULL,
+         title = str_glue("Phylum: {current_phylum}\nGenus: {current_genus}"))
+  
+  fs::dir_create("results/day21_more_abund_genera")
+    
+  ggsave(str_glue("results/day21_more_abund_genera/{current_genus}.png"), width = 4, height = 2, dpi = 600, scale = 1.5)
+  ggsave(str_glue("results/day21_more_abund_genera/{current_genus}.pdf"), width = 4, height = 2, dpi = 600, scale = 1.5)
+  
+}
+
+walk(increasing_genera$taxonomy_id, plot_increasing_genus)
+```
+
+
 
 
 # Random Forest community differences
