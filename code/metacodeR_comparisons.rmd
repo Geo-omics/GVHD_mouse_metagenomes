@@ -4407,7 +4407,8 @@ increasing_genera <- glm_res_w_tax_genus %>%
 rel_abund_long_genus <- rel_abund_long %>% 
   mutate(taxonomy_id = str_glue("d__{Domain};p__{Phylum};c__{Class};o__{Order};f__{Family};g__{Genus}")) %>% 
   filter(taxonomy_id %in% increasing_genera$taxonomy_id) %>% 
-  left_join(metadata)
+  left_join(metadata) %>% 
+  left_join(increasing_genera %>% select(taxonomy_id, rank))
 
 
 genus_id = "d__Bacteria;p__Firmicutes_A;c__Clostridia;o__Peptostreptococcales;f__Anaerovoracaceae;g__RGIG7444"
@@ -4424,6 +4425,11 @@ plot_increasing_genus <- function(genus_id){
   current_genus <- rel_abund_long_genus %>% 
     filter(taxonomy_id == genus_id) %>% 
     pull("Genus") %>% 
+    unique()
+  
+  current_rank <- rel_abund_long_genus %>% 
+    filter(taxonomy_id == genus_id) %>% 
+    pull("rank") %>% 
     unique()
 
   rel_abund_long_genus %>% 
@@ -4443,8 +4449,8 @@ plot_increasing_genus <- function(genus_id){
   
   fs::dir_create("results/day21_more_abund_genera")
     
-  ggsave(str_glue("results/day21_more_abund_genera/{current_genus}.png"), width = 4, height = 2, dpi = 600, scale = 1.5)
-  ggsave(str_glue("results/day21_more_abund_genera/{current_genus}.pdf"), width = 4, height = 2, dpi = 600, scale = 1.5)
+  ggsave(str_glue("results/day21_more_abund_genera/{current_rank}--{current_genus}.png"), width = 4, height = 2, dpi = 600, scale = 1.5)
+  ggsave(str_glue("results/day21_more_abund_genera/{current_rank}--{current_genus}.pdf"), width = 4, height = 2, dpi = 600, scale = 1.5)
   
 }
 
