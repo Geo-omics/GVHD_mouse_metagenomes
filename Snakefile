@@ -2101,6 +2101,33 @@ rule GTDB:
             --pplacer_cpus {params.pplacer_cpus}
         """
 
+rule GTDB_versioned:
+    input:
+        "data/omics/metagenomes/{sample}/bins/bins_for_drep/.bins_linked",
+        "data/reference/GTDBtk/.done_gtdb_refs_downloaded",
+        refs = "data/reference/GTDBtk/{database_version}"
+    params:
+        input_bin_dir = "data/omics/metagenomes/{sample}/bins/bins_for_drep",
+        out_dir = "data/omics/metagenomes/{sample}/bins/GTDB",
+        pplacer_cpus = 1
+    output:
+        done = touch("data/omics/metagenomes/{sample}/bins/.done_GTDB_{database_version}")
+    conda: "config/conda_yaml/gtdbtk_2.4.0.yaml"
+    benchmark: "benchmarks/GTDB/{sample}_database-{database_version}.txt"
+    log: "logs/GTDB/{sample}_database-{database_version}.log"
+    resources: cpus=16, mem_mb=100000, time_min=2880
+    shell:
+        """
+        export GTDBTK_DATA_PATH={input.refs}
+
+        gtdbtk classify_wf \
+            --extension fa \
+            --genome_dir {params.input_bin_dir} \
+            --out_dir {params.out_dir} \
+            --cpus {resources.cpus} \
+            --pplacer_cpus {params.pplacer_cpus}
+        """
+
 rule run_GTDB:
     input:
         expand("data/omics/metagenomes/{sample}/bins/.done_GTDB", sample =metaG_samples)
