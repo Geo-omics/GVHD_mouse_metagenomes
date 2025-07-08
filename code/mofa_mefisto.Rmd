@@ -13,7 +13,7 @@ set.seed(2022)
 conflicted::conflicts_prefer(dplyr::select(), dplyr::rename(), dplyr::filter())
 ```
 
-Testing the example from tutorial
+## Testing the example from tutorial
 
 ```{r}
 set.seed(2020)
@@ -34,13 +34,18 @@ time <- dd$sample_cov
 rownames(time) <- "time"
 ```
 
-Looks like I'll need two "views" (matrices) in a special datatype, one for community abundance, one for metabolomics, maybe a third for gene content? \## Read in data
+Looks like I'll need two "views" (matrices) in a special datatype, one for community abundance, one for metabolomics, maybe a third for gene content?
+
+## GVHD data analysis
+### Read in data
 
 ```{r}
 metadata <- read_metaG_metadata()
 ```
 
-### Community composition
+
+
+#### Community composition
 
 ```{r}
 percent_abund <- read_rds("results/percent_abund.rds")
@@ -66,7 +71,7 @@ vegan_abund <- percent_abund %>%
   t()
 ```
 
-### Metabolomics
+#### Metabolomics
 
 ```{r}
 metabolite_abund <- read_rds("data/metabolomics/combined.rds")
@@ -86,7 +91,7 @@ named_metabolite_abund <- metabolite_abund %>%
 metabolite_abund_vegan <- read_rds("data/metabolomics/combined_vegan.rds")
 ```
 
-### Gene abundance
+#### Gene abundance
 
 ```{r}
 # Read in KO relative abundance
@@ -97,7 +102,7 @@ ko_defs <- read_rds("results/ko_defs.rds")
 #read_rds("results/bin_ko_abund_per_bin.rds")
 ```
 
-## Prep & merge data
+### Prep & merge data
 
 ```{r}
 # mofa_tax_species <- rel_abund_long %>% 
@@ -172,7 +177,7 @@ mofa_combined <- bind_rows(mofa_tax,
 
 ```
 
-## MOFA analysis
+### MOFA analysis
 
 ```{r}
 mofa_obj <- create_mofa_from_df(mofa_combined)
@@ -367,7 +372,7 @@ plot_data_scatter(mofa_trained,
 
 ```
 
-## MEFEISTO
+### MEFEISTO
 
 ```{r}
 
